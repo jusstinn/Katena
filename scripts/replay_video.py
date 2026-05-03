@@ -79,16 +79,21 @@ def _fmt_pct(x: float) -> str:
 
 def _fuse(motion_det: Detection | None, yolo_det: Detection | None) -> Detection | None:
     """Same fusion rules as `EnsembleDetector.detect`, factored out so we can
-    reuse the underlying motion/yolo objects for the side-panel display."""
+    reuse the underlying motion/yolo objects for the side-panel display.
+
+    YOLO's bbox is tighter on the airframe than MOG2's wobbling motion
+    blob, so when YOLO concurs we anchor the AIM POINT to YOLO's bbox.
+    Priority: ensemble (YOLO bbox + boosted conf) > YOLO-only > motion.
+    """
     if motion_det and yolo_det:
         if _bbox_iou(motion_det.bbox, yolo_det.bbox) >= 0.2:
             return Detection(
-                bbox=motion_det.bbox,
-                centroid=motion_det.centroid,
+                bbox=yolo_det.bbox,
+                centroid=yolo_det.centroid,
                 confidence=min(1.0, (motion_det.confidence + yolo_det.confidence) / 2.0 + 0.2),
                 source="ensemble",
             )
-        return motion_det
+        return yolo_det
     if yolo_det:
         return yolo_det
     return motion_det
@@ -320,11 +325,17 @@ def main() -> int:
                         help="Sweep X frequency in Hz (keep <= ~1.5 for real servos).")
     parser.add_argument("--fire-freq-y", type=float, default=0.7,
                         help="Sweep Y frequency in Hz (keep <= ~1.5 for real servos).")
-    parser.add_argument("--fire-trail-len", type=int, default=40,
-                        help="Number of recent aim points rendered as fading trail.")
-    parser.add_argument("--fire-arm-conf", type=float, default=0.55)
-    parser.add_argument("--fire-arm-dwell-s", type=float, default=0.8)
-    parser.add_argument("--fire-disarm-conf", type=float, default=0.30)
+    parser.add_argument("--fire-trail-len", type=int, default=120,
+                        help="Number of recent aim points rendered as fading trail. "
+                             "120 ~ 4s at 30 fps; the renderer also age-fades any "
+                             "segment older than ~2s so cooldown frames look natural.")
+    parser.add_argument("--fire-arm-conf", type=float, default=0.45,
+                        help="Detection conf needed (sustained) to ARM. Down from "
+                             "0.55 because gating uses the fused detection conf now, "
+                             "not the predictor's harsh multiplicative score.")
+    parser.add_argument("--fire-arm-dwell-s", type=float, default=0.30,
+                        help="Sustained-conf seconds before ARM. Down from 0.8s.")
+    parser.add_argument("--fire-disarm-conf", type=float, default=0.20)
     parser.add_argument("--fire-override", default="auto",
                         choices=["auto", "force_on", "force_off"],
                         help="Manual override for FIRE state (force_on shows the "
@@ -593,8 +604,17 @@ def main() -> int:
                         predictor.reset()
 
             if sweep_planner is not None and fire_ctl is not None:
-                conf_for_fire = tracked.confidence if tracked is not None else None
+                # Use the detection's own confidence (already composite
+                # "drone-likelihood") to gate FIRE, not the predictor's
+                # multiplicative score (age * speed * straightness was
+                # so harsh that auto-arm almost never triggered for
+                # hovering / curving drones).
+                conf_for_fire = (
+                    fused_for_aim.confidence if fused_for_aim is not None else None
+                )
                 fire_decision = fire_ctl.update(conf_for_fire, args.fire_override)
+                zone = None
+                laser_xy = None
                 if fused_for_aim is not None and fire_decision.laser_on:
                     velocity = (
                         tracked.velocity if tracked is not None else (0.0, 0.0)
@@ -602,10 +622,10 @@ def main() -> int:
                     zone = sweep_planner.zone(fused_for_aim.bbox, velocity)
                     laser_xy = sweep_planner.aim_point(time.perf_counter(), zone)
                     laser_trail.append((time.perf_counter(), laser_xy))
-                    _draw_fire_overlay(frame, zone, laser_trail, laser_xy)
-                else:
-                    if laser_trail:
-                        laser_trail.clear()
+                # Render even on disengage frames -- the renderer
+                # age-fades old segments so the arc disappears
+                # gracefully instead of being wiped instantly.
+                _draw_fire_overlay(frame, zone, laser_trail, laser_xy)
                 _draw_fire_status(frame, fire_decision)
 
             now = time.perf_counter()

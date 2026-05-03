@@ -240,48 +240,65 @@ class SweepPlanner:
 
 def draw_fire_overlay(
     frame,                                        # np.ndarray
-    zone: AimZone,
+    zone: AimZone | None,
     trail,                                        # deque[(t, (x, y))]
-    laser_xy: tuple[float, float],
+    laser_xy: tuple[float, float] | None,
+    *,
+    trail_max_age_s: float = 2.0,
+    now: float | None = None,
 ) -> None:
-    """Draw the aim zone outline + fading laser trail + current dot."""
+    """Draw the aim zone outline + age-faded laser trail + current dot.
+
+    The trail is rendered from the existing `(t, point)` deque; entries
+    older than `trail_max_age_s` are skipped so that during a long
+    laser-OFF gap the trail naturally fades out instead of hanging on
+    forever (or being wiped instantly).
+
+    `zone` and `laser_xy` may be None during cooldown / no-target frames,
+    in which case only the trail is drawn -- this is what keeps the
+    fading arc visible even after the laser disengages.
+    """
     import cv2
     import numpy as np
+    import time as _time
 
     h, w = frame.shape[:2]
+    t_now = now if now is not None else _time.perf_counter()
 
-    # Aim zone outline (alpha-blended so it doesn't overpower the scene)
-    pts = np.array([[int(round(x)), int(round(y))] for (x, y) in zone.corners()],
-                   dtype=np.int32)
-    overlay = frame.copy()
-    cv2.polylines(overlay, [pts], isClosed=True, color=(0, 0, 255),
-                  thickness=1, lineType=cv2.LINE_AA)
-    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    if zone is not None:
+        pts = np.array([[int(round(x)), int(round(y))] for (x, y) in zone.corners()],
+                       dtype=np.int32)
+        overlay = frame.copy()
+        cv2.polylines(overlay, [pts], isClosed=True, color=(0, 0, 255),
+                      thickness=1, lineType=cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
-    # Fading trail. Newer segments brighter.
-    items = list(trail)
+    items = [(t, p) for (t, p) in trail if (t_now - t) <= trail_max_age_s]
     n = len(items)
     if n >= 2:
+        oldest_age = t_now - items[0][0]
+        newest_age = t_now - items[-1][0]
         for i in range(n - 1, 0, -1):
-            (_, p1) = items[i - 1]
-            (_, p2) = items[i]
+            (t1, p1) = items[i - 1]
+            (t2, p2) = items[i]
             x1i, y1i = int(round(p1[0])), int(round(p1[1]))
             x2i, y2i = int(round(p2[0])), int(round(p2[1]))
             if (x1i < 0 or x1i >= w or y1i < 0 or y1i >= h
                     or x2i < 0 or x2i >= w or y2i < 0 or y2i >= h):
                 continue
-            age_frac = i / n
-            alpha = max(0.05, age_frac)
+            seg_age = t_now - 0.5 * (t1 + t2)
+            life_frac = max(0.0, 1.0 - seg_age / max(trail_max_age_s, 1e-6))
+            alpha = max(0.05, life_frac)
             overlay = frame.copy()
             cv2.line(overlay, (x1i, y1i), (x2i, y2i),
                      (0, 80, 255), 2, cv2.LINE_AA)
             cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
-    # Current laser dot (bright, solid)
-    lx_i, ly_i = int(round(laser_xy[0])), int(round(laser_xy[1]))
-    if 0 <= lx_i < w and 0 <= ly_i < h:
-        cv2.circle(frame, (lx_i, ly_i), 5, (0, 0, 255), -1, cv2.LINE_AA)
-        cv2.circle(frame, (lx_i, ly_i), 9, (0, 100, 255), 1, cv2.LINE_AA)
+    if laser_xy is not None:
+        lx_i, ly_i = int(round(laser_xy[0])), int(round(laser_xy[1]))
+        if 0 <= lx_i < w and 0 <= ly_i < h:
+            cv2.circle(frame, (lx_i, ly_i), 5, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (lx_i, ly_i), 9, (0, 100, 255), 1, cv2.LINE_AA)
 
 
 def draw_fire_status(frame, decision, text_fn=None) -> None:

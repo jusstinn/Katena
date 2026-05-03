@@ -133,15 +133,33 @@ def _fmt_pct(x: float) -> str:
 
 
 def _fuse(motion_det: Detection | None, yolo_det: Detection | None) -> Detection | None:
+    """Combine motion + YOLO detections into one aim target.
+
+    YOLO's bounding box is much tighter on the actual airframe than
+    MOG2's blob (which wobbles with shadows / lighting / partial
+    occlusion). So whenever YOLO concurs with motion (their boxes
+    overlap), the AIM POINT is computed from YOLO's bbox, not motion's
+    -- the laser sits cleanly under the drone instead of drifting with
+    the motion blob's edge.
+
+    Priority order:
+      1. Both fire AND overlap (IoU >= 0.2)  -> ensemble: YOLO bbox,
+         confidence-boosted to encode "two independent detectors agree".
+      2. Both fire but DISAGREE (separate objects)  -> prefer YOLO; it's
+         the one trained to recognise drones specifically.
+      3. Only YOLO  -> YOLO.
+      4. Only motion  -> motion (last resort, before YOLO is loaded
+         or when the drone is too small for the model).
+    """
     if motion_det and yolo_det:
         if _bbox_iou(motion_det.bbox, yolo_det.bbox) >= 0.2:
             return Detection(
-                bbox=motion_det.bbox,
-                centroid=motion_det.centroid,
+                bbox=yolo_det.bbox,
+                centroid=yolo_det.centroid,
                 confidence=min(1.0, (motion_det.confidence + yolo_det.confidence) / 2.0 + 0.2),
                 source="ensemble",
             )
-        return motion_det
+        return yolo_det
     if yolo_det:
         return yolo_det
     return motion_det
@@ -342,14 +360,22 @@ def main() -> int:
                         help="Sweep X frequency in Hz (keep <= ~1.5 for real servos).")
     parser.add_argument("--fire-freq-y", type=float, default=0.7,
                         help="Sweep Y frequency in Hz (keep <= ~1.5 for real servos).")
-    parser.add_argument("--fire-trail-len", type=int, default=40,
-                        help="Number of recent aim points to render as the fading trail.")
-    parser.add_argument("--fire-arm-conf", type=float, default=0.55,
-                        help="Pred conf required (sustained) to ARM the laser.")
-    parser.add_argument("--fire-arm-dwell-s", type=float, default=0.8,
-                        help="Seconds of sustained high conf before ARMING.")
-    parser.add_argument("--fire-disarm-conf", type=float, default=0.30,
-                        help="Conf below which an ARMED lock disarms.")
+    parser.add_argument("--fire-trail-len", type=int, default=120,
+                        help="Number of recent aim points to render as the fading trail. "
+                             "120 ~ 4s of trail at 30 fps; segments older than ~2s "
+                             "are alpha-faded out by the renderer regardless.")
+    parser.add_argument("--fire-arm-conf", type=float, default=0.45,
+                        help="Detection conf required (sustained) to ARM the laser. "
+                             "Lowered from 0.55 because we now arm on the fused "
+                             "DETECTION's own confidence instead of the predictor's "
+                             "harsh multiplicative score.")
+    parser.add_argument("--fire-arm-dwell-s", type=float, default=0.30,
+                        help="Seconds of sustained high conf before ARMING. "
+                             "Lowered from 0.8s -- with detection-confidence gating, "
+                             "0.3s is enough to filter single-frame YOLO blips while "
+                             "still firing within ~9 frames of acquisition.")
+    parser.add_argument("--fire-disarm-conf", type=float, default=0.20,
+                        help="Conf below which an ARMED lock disarms (hysteresis).")
     parser.add_argument("--fire-override", default="auto",
                         choices=["auto", "force_on", "force_off"],
                         help="Manual override for the FIRE controller.")
@@ -672,10 +698,16 @@ def main() -> int:
             # ---- FIRE: sweep planning + render -------------------------
             fire_decision = None
             if sweep_planner is not None and fire_ctl is not None:
+                # Use the fused detection's own confidence (already a
+                # composite "drone-likelihood") instead of the predictor's
+                # multiplicative score, which was so harsh that auto-arm
+                # almost never triggered for hovering / curving drones.
                 conf_for_fire = (
-                    tracked.confidence if tracked is not None else None
+                    fused_for_aim.confidence if fused_for_aim is not None else None
                 )
                 fire_decision = fire_ctl.update(conf_for_fire, args.fire_override)
+                zone = None
+                laser_xy = None
                 if fused_for_aim is not None and fire_decision.laser_on:
                     velocity = (
                         tracked.velocity if tracked is not None else (0.0, 0.0)
@@ -683,12 +715,11 @@ def main() -> int:
                     zone = sweep_planner.zone(fused_for_aim.bbox, velocity)
                     laser_xy = sweep_planner.aim_point(time.perf_counter(), zone)
                     laser_trail.append((time.perf_counter(), laser_xy))
-                    _draw_fire_overlay(frame, zone, laser_trail, laser_xy)
-                else:
-                    # Drop the trail when the laser disengages so a stale
-                    # arc doesn't hang on screen during cooldown.
-                    if laser_trail:
-                        laser_trail.clear()
+                # Always render whatever trail we have. The renderer
+                # age-fades old segments, so during cooldown the arc
+                # gracefully fades to nothing instead of being wiped on
+                # the very next frame.
+                _draw_fire_overlay(frame, zone, laser_trail, laser_xy)
                 _draw_fire_status(frame, fire_decision)
 
             now = time.perf_counter()

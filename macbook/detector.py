@@ -533,18 +533,22 @@ class EnsembleDetector:
         motion_det = self.motion.detect(frame)
         yolo_det = self.yolo.detect(frame) if self.yolo else None
 
+        # When YOLO and motion agree we anchor the bbox (and therefore
+        # the aim point) to YOLO -- it's tight to the airframe while
+        # MOG2's blob wobbles with shadows / lighting / partial
+        # occlusion. The boosted confidence still encodes "two
+        # independent detectors saw the same object".
         if motion_det and yolo_det:
             iou = _bbox_iou(motion_det.bbox, yolo_det.bbox)
             if iou >= self.iou_match:
-                box = motion_det.bbox
                 conf = min(1.0, (motion_det.confidence + yolo_det.confidence) / 2.0 + 0.2)
                 return Detection(
-                    bbox=box,
-                    centroid=motion_det.centroid,
+                    bbox=yolo_det.bbox,
+                    centroid=yolo_det.centroid,
                     confidence=conf,
                     source="ensemble",
                 )
-            return motion_det
+            return yolo_det
         if yolo_det:
             return yolo_det
         return motion_det

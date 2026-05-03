@@ -48,9 +48,9 @@ class FireDecision:
 class FireController:
     def __init__(
         self,
-        arm_conf: float = 0.55,
-        disarm_conf: float = 0.30,
-        arm_dwell_s: float = 0.8,
+        arm_conf: float = 0.45,
+        disarm_conf: float = 0.20,
+        arm_dwell_s: float = 0.30,
         cooldown_s: float = 0.5,
         clock=None,
     ) -> None:
