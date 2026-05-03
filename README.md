@@ -11,7 +11,7 @@
 
 ## Live demo
 
-<video src="https://github.com/jusstinn/Katena/raw/main/DroneKill.mp4" controls width="720" muted></video>
+![Katena closed-loop drone neutralization demo](DroneKill.gif)
 
 > Closed-loop run on the bench rig: drone-trained YOLOv8 on a Jetson
 > CASK, pixel-to-servo IDW calibration, and a 100 Hz host-side
@@ -19,9 +19,8 @@
 > sweeps the laser in a controlled lissajous under the airframe — over
 > the fiber tether's exit zone.
 >
-> If the embedded player above doesn't load (some GitHub views block
-> inline `<video>` tags), grab the file directly:
-> [DroneKill.mp4](DroneKill.mp4).
+> Full-quality MP4 (3.8 MB, 720p): [DroneKill.mp4](DroneKill.mp4)
+> · open it from the file list above and click **View raw** to download.
 
 ---
 
