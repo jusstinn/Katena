@@ -136,13 +136,16 @@ class Tracker:
     def _state_dwell(self) -> float:
         return time.time() - self.state_entered_at
 
-    def _command_aim(self, det: Detection, mode: PicoMode) -> tuple[float, float]:
+    def _command_aim(
+        self, det: Detection, mode: PicoMode
+    ) -> tuple[float, float, float]:
         ax, ay = det.aim_point()
         ax = max(0, min(self.cal.frame_width - 1, ax))
         ay = max(0, min(self.cal.frame_height - 1, ay))
         pan, tilt = self.cal.pixel_to_servo(float(ax), float(ay))
-        self.link.aim(pan, tilt, mode)
-        return pan, tilt
+        rotation = self.cal.pixel_to_rotation(float(ax), float(ay))
+        self.link.aim(pan, tilt, mode, rotation=rotation)
+        return pan, tilt, rotation
 
     def _advance(self, det: Detection | None, fiber_signal: float) -> None:
         state = self.sm.state
@@ -196,20 +199,23 @@ class Tracker:
                 self.current_engagement = None
                 self.sm.transition(EngagementState.SEARCHING)
 
-    def _drive_servos(self, det: Detection | None) -> tuple[float | None, float | None]:
+    def _drive_servos(
+        self, det: Detection | None
+    ) -> tuple[float | None, float | None, float | None]:
         state = self.sm.state
         if det is None:
-            return None, None
+            return None, None, None
         if state in (EngagementState.TARGET_ACQUIRED, EngagementState.CLASSIFYING, EngagementState.FOG_CONFIRMED):
-            pan, tilt = self._command_aim(det, PicoMode.TRACKING)
-            return pan, tilt
+            pan, tilt, rot = self._command_aim(det, PicoMode.TRACKING)
+            return pan, tilt, rot
         if state in (EngagementState.ENGAGING, EngagementState.FIBER_COMPROMISED):
-            pan, tilt = self._command_aim(det, PicoMode.LOCKED)
+            pan, tilt, rot = self._command_aim(det, PicoMode.LOCKED)
             if self.current_engagement is not None:
                 self.current_engagement.pan_angle = pan
                 self.current_engagement.tilt_angle = tilt
-            return pan, tilt
-        return None, None
+                self.current_engagement.rotation_angle = rot
+            return pan, tilt, rot
+        return None, None, None
 
     def _draw_help(self, frame) -> None:
         if not self.show_help:

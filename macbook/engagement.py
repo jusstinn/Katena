@@ -51,6 +51,7 @@ class DroneEngagement:
 
     pan_angle: float | None = None
     tilt_angle: float | None = None
+    rotation_angle: float | None = None
 
     notes: str = ""
 

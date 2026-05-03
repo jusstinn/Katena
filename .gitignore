@@ -40,6 +40,8 @@ foundry_token.txt
 downloads/
 # YOLO training output
 runs/
+# YOLO training datasets (downloaded, re-fetchable)
+datasets/
 # TensorRT engines
 *.engine
 # Local servo calibration (machine-specific)
@@ -57,7 +59,12 @@ osdk_drone_neutralizer/
 # Comment out next line if you want to commit the weights
 yolov8n.pt
 yolov8*.pt
+*.pt
 *.onnx
+# Local-only HF model cache (re-downloadable; large)
+models/
+# Symlink that points into runs/ which is also gitignored
+latest_drone_best.pt
 
 # --- Logs ---
 *.log

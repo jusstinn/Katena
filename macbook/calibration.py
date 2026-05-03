@@ -5,9 +5,16 @@ anchor points. Interpolates with inverse-distance-weighting (IDW)
 which works on arbitrary anchor configurations (no need for a regular
 grid, unlike bilinear).
 
-The calibration tool (calibration_tool.py) is what populates this.
-The tracker just calls `pixel_to_servo(px, py)` to translate detections
-into servo commands.
+A second, independent set of anchors maps (pixel_x, pixel_y) -> stepper
+rotation in degrees (the 28BYJ-48 base axis that rotates the whole rig
+in the XOY plane). Until those rotation anchors are populated,
+`pixel_to_rotation` just returns the rotation center, so adding the
+stepper to the rig today is a pure no-op for the existing tracker;
+calibration data can be added later without touching this code.
+
+The calibration tool (calibration_tool.py) is what populates both
+sets. The tracker calls `pixel_to_servo(px, py)` for pan/tilt and
+`pixel_to_rotation(px, py)` for the stepper.
 """
 
 from __future__ import annotations
@@ -28,8 +35,18 @@ class CalibrationAnchor:
 
 
 @dataclass
+class RotationAnchor:
+    """Pixel -> 28BYJ-48 stepper rotation in degrees."""
+
+    pixel_x: float
+    pixel_y: float
+    rotation_angle: float
+
+
+@dataclass
 class Calibration:
     anchors: list[CalibrationAnchor] = field(default_factory=list)
+    rotation_anchors: list[RotationAnchor] = field(default_factory=list)
     frame_width: int = 1280
     frame_height: int = 720
     pan_min: float = 0.0
@@ -38,9 +55,15 @@ class Calibration:
     tilt_max: float = 180.0
     pan_center: float = 90.0
     tilt_center: float = 90.0
+    rotation_min: float = -180.0
+    rotation_max: float = 180.0
+    rotation_center: float = 0.0
 
     def add(self, anchor: CalibrationAnchor) -> None:
         self.anchors.append(anchor)
+
+    def add_rotation(self, anchor: RotationAnchor) -> None:
+        self.rotation_anchors.append(anchor)
 
     def remove_nearest(self, px: float, py: float, max_dist: float = 30.0) -> bool:
         if not self.anchors:
@@ -54,8 +77,20 @@ class Calibration:
             return True
         return False
 
+    def remove_nearest_rotation(self, px: float, py: float, max_dist: float = 30.0) -> bool:
+        if not self.rotation_anchors:
+            return False
+        nearest_idx = min(
+            range(len(self.rotation_anchors)),
+            key=lambda i: self._dist(self.rotation_anchors[i], px, py),
+        )
+        if self._dist(self.rotation_anchors[nearest_idx], px, py) <= max_dist:
+            del self.rotation_anchors[nearest_idx]
+            return True
+        return False
+
     @staticmethod
-    def _dist(a: CalibrationAnchor, px: float, py: float) -> float:
+    def _dist(a: CalibrationAnchor | RotationAnchor, px: float, py: float) -> float:
         return math.hypot(a.pixel_x - px, a.pixel_y - py)
 
     def pixel_to_servo(self, px: float, py: float, k: int = 4, power: float = 2.0) -> tuple[float, float]:
@@ -91,6 +126,37 @@ class Calibration:
             max(self.tilt_min, min(self.tilt_max, tilt)),
         )
 
+    def pixel_to_rotation(
+        self, px: float, py: float, k: int = 4, power: float = 2.0
+    ) -> float:
+        """IDW-interpolate the 28BYJ-48 stepper angle for a given pixel.
+
+        Returns `rotation_center` if no rotation anchors have been
+        captured yet — meaning the stepper just stays at zero, and the
+        existing pan/tilt servos do all the aiming until you actually
+        calibrate the base axis.
+        """
+        if not self.rotation_anchors:
+            return self.rotation_center
+
+        if len(self.rotation_anchors) == 1:
+            return self._clamp_rotation(self.rotation_anchors[0].rotation_angle)
+
+        sorted_anchors = sorted(
+            self.rotation_anchors, key=lambda a: self._dist(a, px, py)
+        )[:k]
+
+        if self._dist(sorted_anchors[0], px, py) < 1e-6:
+            return self._clamp_rotation(sorted_anchors[0].rotation_angle)
+
+        weights = [1.0 / (self._dist(a, px, py) ** power) for a in sorted_anchors]
+        total = sum(weights)
+        rot = sum(w * a.rotation_angle for w, a in zip(weights, sorted_anchors)) / total
+        return self._clamp_rotation(rot)
+
+    def _clamp_rotation(self, rot: float) -> float:
+        return max(self.rotation_min, min(self.rotation_max, rot))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "frame_width": self.frame_width,
@@ -101,7 +167,11 @@ class Calibration:
             "tilt_max": self.tilt_max,
             "pan_center": self.pan_center,
             "tilt_center": self.tilt_center,
+            "rotation_min": self.rotation_min,
+            "rotation_max": self.rotation_max,
+            "rotation_center": self.rotation_center,
             "anchors": [a.__dict__ for a in self.anchors],
+            "rotation_anchors": [a.__dict__ for a in self.rotation_anchors],
         }
 
     @classmethod
@@ -115,9 +185,14 @@ class Calibration:
             tilt_max=d.get("tilt_max", 180.0),
             pan_center=d.get("pan_center", 90.0),
             tilt_center=d.get("tilt_center", 90.0),
+            rotation_min=d.get("rotation_min", -180.0),
+            rotation_max=d.get("rotation_max", 180.0),
+            rotation_center=d.get("rotation_center", 0.0),
         )
         for raw in d.get("anchors", []):
             c.anchors.append(CalibrationAnchor(**raw))
+        for raw in d.get("rotation_anchors", []):
+            c.rotation_anchors.append(RotationAnchor(**raw))
         return c
 
     def save(self, path: Path) -> None:

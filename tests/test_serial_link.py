@@ -26,10 +26,33 @@ class TestFormatCommand:
             cmd = _format_command(pan, tilt, mode).decode().rstrip()
             parsed = pico_controller._parse_command(cmd)
             assert parsed is not None, cmd
-            p, t, m = parsed
+            p, t, r, m = parsed
             assert abs(p - pan) < 0.1
             assert abs(t - tilt) < 0.1
+            assert r is None
             assert m == int(mode)
+
+    def test_round_trip_with_rotation(self, pico_controller):
+        for pan, tilt, rot, mode in [
+            (95.5, 47.2, 12.5, PicoMode.SWEEP),
+            (0.0, 180.0, -90.0, PicoMode.IDLE),
+            (90.0, 90.0, 0.0, PicoMode.LOCKED),
+            (90.0, 90.0, 179.9, PicoMode.TRACKING),
+        ]:
+            cmd = _format_command(pan, tilt, mode, rotation=rot).decode().rstrip()
+            parsed = pico_controller._parse_command(cmd)
+            assert parsed is not None, cmd
+            p, t, r, m = parsed
+            assert abs(p - pan) < 0.1
+            assert abs(t - tilt) < 0.1
+            assert abs(r - rot) < 0.1
+            assert m == int(mode)
+
+    def test_rotation_clamped_to_180(self):
+        cmd = _format_command(90, 90, PicoMode.IDLE, rotation=999)
+        assert b"R180.0" in cmd
+        cmd = _format_command(90, 90, PicoMode.IDLE, rotation=-999)
+        assert b"R-180.0" in cmd
 
     def test_clamps_out_of_range(self):
         cmd = _format_command(-50, 999, PicoMode.IDLE)
@@ -39,6 +62,12 @@ class TestFormatCommand:
     def test_command_ends_in_newline(self):
         cmd = _format_command(90, 90, PicoMode.IDLE)
         assert cmd.endswith(b"\n")
+        cmd = _format_command(90, 90, PicoMode.IDLE, rotation=45.0)
+        assert cmd.endswith(b"\n")
+
+    def test_no_rotation_omits_R_field(self):
+        cmd = _format_command(90, 90, PicoMode.IDLE)
+        assert b"R" not in cmd
 
     @pytest.mark.parametrize("mode", list(PicoMode))
     def test_all_modes_serialize(self, mode):
@@ -73,6 +102,20 @@ class TestParseTelemetry:
     def test_garbage_line_returns_none(self):
         for line in ["", "garbage", "DSL", "P90T90M0"]:
             assert _parse_telemetry(line) is None
+
+    def test_parses_rotation_when_present(self):
+        tel = _parse_telemetry("D45.7S2L450A37.5")
+        assert tel is not None
+        assert tel.rotation_deg == 37.5
+
+    def test_parses_negative_rotation(self):
+        tel = _parse_telemetry("D45.7S2L450A-90.0")
+        assert tel.rotation_deg == -90.0
+
+    def test_legacy_telemetry_without_rotation_still_parses(self):
+        tel = _parse_telemetry("D45.7S2L450")
+        assert tel is not None
+        assert tel.rotation_deg is None
 
 
 class TestMockPicoLink:
@@ -133,6 +176,36 @@ class TestMockPicoLink:
         link.aim(45.5, 67.2, PicoMode.TRACKING)
         assert link._last_pan == 45.5
         assert link._last_tilt == 67.2
+
+    def test_rotation_target_advances_toward_value(self):
+        link = MockPicoLink(rotation_speed_deg_s=1000.0)
+        link.aim(90, 90, PicoMode.TRACKING, rotation=45.0)
+        time.sleep(0.1)
+        tel = link.telemetry()
+        assert tel.rotation_deg == pytest.approx(45.0, abs=1.0)
+
+    def test_rotation_omitted_keeps_previous_target(self):
+        link = MockPicoLink(rotation_speed_deg_s=1000.0)
+        link.aim(90, 90, PicoMode.TRACKING, rotation=30.0)
+        time.sleep(0.1)
+        link.telemetry()
+        link.aim(91, 91, PicoMode.TRACKING)
+        time.sleep(0.1)
+        tel = link.telemetry()
+        assert tel.rotation_deg == pytest.approx(30.0, abs=1.0)
+
+    def test_rotation_clamped_in_aim(self):
+        link = MockPicoLink(rotation_speed_deg_s=1000.0)
+        link.aim(90, 90, PicoMode.TRACKING, rotation=999.0)
+        assert link._rotation_target == 180.0
+        link.aim(90, 90, PicoMode.TRACKING, rotation=-999.0)
+        assert link._rotation_target == -180.0
+
+    def test_telemetry_includes_rotation_field(self):
+        link = MockPicoLink()
+        tel = link.telemetry()
+        assert tel.rotation_deg is not None
+        assert tel.rotation_deg == 0.0
 
 
 class TestOpenLinkFactory:

@@ -27,9 +27,10 @@ A laser pointer is enough.
 ## How the system works
 
 ```
-                ┌───────────────────────────────────┐
-                │  Camera (USB) on pan/tilt gimbal  │
-                └─────────────┬─────────────────────┘
+                ┌───────────────────────────────────────────┐
+                │  Camera (USB) on pan/tilt + base-rotation │
+                │  gimbal (28BYJ-48 stepper underneath)     │
+                └─────────────┬─────────────────────────────┘
                               ▼
         ┌─────────────────────────────────────────┐
         │  Detection: OpenCV motion + YOLOv8      │
@@ -43,13 +44,18 @@ A laser pointer is enough.
         └─────────────┬───────────────────────────┘
                       ▼
         ┌─────────────────────────────────────────┐
-        │  Pixel → servo angle (calibration map). │
-        │  Send "P{pan}T{tilt}M{mode}" to Pico.   │
+        │  Pixel → (pan, tilt, base-rotation)     │
+        │  via IDW calibration map.               │
+        │  Send "P{pan}T{tilt}R{rot}M{mode}" to   │
+        │  Pico. R is optional until the stepper  │
+        │  is calibrated.                         │
         └─────────────┬───────────────────────────┘
                       ▼
         ┌─────────────────────────────────────────┐
-        │  Pico W drives PWM. Photodetector       │
-        │  reports fiber signal level back.       │
+        │  Pico W drives PWM (servos) +           │
+        │  half-step coil sequence (28BYJ-48 via  │
+        │  ULN2003). Photodetector reports fiber  │
+        │  signal level back.                     │
         └─────────────┬───────────────────────────┘
                       ▼
         ┌─────────────────────────────────────────┐
@@ -162,7 +168,9 @@ See `jetson/README.md`. tl;dr: SSH in, `rsync` the project over,
 | Compute (primary) | MacBook Air M5 (Apple Silicon, Metal/MPS) |
 | Compute (edge) | Palantir CASK on NVIDIA Jetson |
 | Vision | OpenCV 4.13 + YOLOv8n (Ultralytics 8.4) |
-| Servo control | Pico W running MicroPython 1.28 |
+| Pan/tilt servos | 2× 9G hobby servos on Pico W PWM (50 Hz) |
+| Base rotation (XOY plane) | 28BYJ-48 stepper + ULN2003, half-step driven by Pico |
+| Servo / stepper control | Pico W running MicroPython 1.28 |
 | Ontology / sync | Palantir Foundry + OSDK (Embedded Ontology) |
 | Local dashboard | Streamlit |
 | Optional sensor | RTL-SDR for RF-silence FOG confirmation |
@@ -188,11 +196,13 @@ See `jetson/README.md`. tl;dr: SSH in, `rsync` the project over,
 | Project scaffolding + verification scripts | ✅ Done |
 | MicroPython firmware downloaded | ✅ Done |
 | Thonny installer downloaded | ✅ Done (run installer from `downloads/`) |
+| `macbook/main_tracker.py` (detection + servo + stepper cmd) | ✅ Done |
+| `pico/pico_controller.py` (servos + 28BYJ-48 stepper + sensors) | ✅ Done |
+| 156 unit tests covering host + firmware + protocol | ✅ Done |
 | Camera permission granted in macOS | ⏳ User action required |
 | Foundry: object types defined | ⏳ Tomorrow |
 | Foundry: OSDK client generated | ⏳ Tomorrow |
 | Pico W flashed | ⏳ When hardware arrives |
-| `macbook/main_tracker.py` (detection + servo cmd) | ⏳ Build phase |
-| `pico/pico_controller.py` (servo + sensor firmware) | ⏳ Build phase |
-| Jetson bootstrap | ⏳ When CASK kit is in hand |
+| Pan/tilt + stepper calibration (`make calibrate`) | ⏳ When rig is assembled |
+| Jetson bootstrap | ✅ Cloned + apt deps; CUDA torch install in progress |
 | `paper/main.tex` (physics writeup) | ⏳ Optional |

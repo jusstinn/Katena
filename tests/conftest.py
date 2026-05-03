@@ -1,19 +1,40 @@
-"""Shared pytest fixtures + the MicroPython `machine` shim.
+"""Shared pytest fixtures + the MicroPython `machine` / `time` shims.
 
-The `machine` shim lets us import `pico/pico_controller.py` from CPython
-(the firmware uses `from machine import Pin, PWM, ADC` which only exists
-on the actual Pico). We replace the module with stubs that record calls
-so we can inspect what the firmware *would* have done with real hardware.
+These shims let us import `pico/pico_controller.py` from CPython (the
+firmware uses `from machine import Pin, PWM, ADC` and MicroPython-only
+helpers like `time.ticks_ms()` / `time.ticks_us()` / `time.ticks_diff()`
+which don't exist in CPython). We replace `machine` with stubs that
+record calls so we can inspect what the firmware *would* have done with
+real hardware, and we monkey-patch the missing `time.ticks_*` helpers
+onto CPython's `time` module so the firmware classes can be constructed
+and exercised in unit tests.
 """
 
 from __future__ import annotations
 
 import sys
+import time as _time
 import types
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+
+def _install_time_shim() -> None:
+    if not hasattr(_time, "ticks_ms"):
+        _time.ticks_ms = lambda: int(_time.monotonic() * 1000)
+    if not hasattr(_time, "ticks_us"):
+        _time.ticks_us = lambda: int(_time.monotonic() * 1_000_000)
+    if not hasattr(_time, "ticks_diff"):
+        _time.ticks_diff = lambda a, b: a - b
+    if not hasattr(_time, "ticks_add"):
+        _time.ticks_add = lambda a, delta: a + delta
+    if not hasattr(_time, "sleep_us"):
+        _time.sleep_us = lambda us: _time.sleep(us / 1_000_000)
+
+
+_install_time_shim()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))

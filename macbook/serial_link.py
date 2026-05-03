@@ -9,8 +9,15 @@ Two implementations behind one interface:
                    any physical photodetector.
 
 Protocol:
-    Host -> Pico:   "P{pan}T{tilt}M{mode}\n"   (pan/tilt 0-180, mode 0-3)
-    Pico -> Host:   "D{cm}S{status}L{ldr}\n"   (distance, status, LDR 0-1023)
+    Host -> Pico:   "P{pan}T{tilt}[R{rot}]M{mode}\n"
+                    pan/tilt 0-180 deg, rot in deg (relative to power-on
+                    position of the 28BYJ-48 base stepper), mode 0-3.
+                    R is OPTIONAL — when omitted the stepper target is
+                    unchanged.
+    Pico -> Host:   "D{cm}S{status}L{ldr}A{rot}\n"
+                    distance cm, status 0-3, LDR 0-1023, A = current
+                    stepper angle in degrees. A is parsed when present
+                    and silently ignored if a legacy firmware omits it.
 """
 
 from __future__ import annotations
@@ -34,6 +41,10 @@ class PicoMode(IntEnum):
     LOCKED = 3
 
 
+ROTATION_MIN_DEG = -180.0
+ROTATION_MAX_DEG = 180.0
+
+
 @dataclass
 class PicoTelemetry:
     """Latest reading from the Pico. distance/ldr may be None if no sensor."""
@@ -43,15 +54,26 @@ class PicoTelemetry:
     ldr_raw: int | None = None
     received_at: float = 0.0
     fiber_signal: float = 1.0
+    rotation_deg: float | None = None
 
 
-def _format_command(pan: float, tilt: float, mode: PicoMode) -> bytes:
+def _format_command(
+    pan: float,
+    tilt: float,
+    mode: PicoMode,
+    rotation: float | None = None,
+) -> bytes:
     pan = max(0.0, min(180.0, pan))
     tilt = max(0.0, min(180.0, tilt))
-    return f"P{pan:.1f}T{tilt:.1f}M{int(mode)}\n".encode()
+    if rotation is None:
+        return f"P{pan:.1f}T{tilt:.1f}M{int(mode)}\n".encode()
+    rot = max(ROTATION_MIN_DEG, min(ROTATION_MAX_DEG, rotation))
+    return f"P{pan:.1f}T{tilt:.1f}R{rot:.1f}M{int(mode)}\n".encode()
 
 
-_TELEMETRY_RE = re.compile(r"D(?P<d>-?\d+(?:\.\d+)?)S(?P<s>\d+)L(?P<l>\d+)")
+_TELEMETRY_RE = re.compile(
+    r"D(?P<d>-?\d+(?:\.\d+)?)S(?P<s>\d+)L(?P<l>\d+)(?:A(?P<a>-?\d+(?:\.\d+)?))?"
+)
 
 
 def _parse_telemetry(line: str, ldr_full: int = 900, ldr_cut: int = 50) -> PicoTelemetry | None:
@@ -61,6 +83,7 @@ def _parse_telemetry(line: str, ldr_full: int = 900, ldr_cut: int = 50) -> PicoT
     distance = float(m.group("d"))
     status = int(m.group("s"))
     ldr = int(m.group("l"))
+    rotation = float(m.group("a")) if m.group("a") is not None else None
     span = max(1, ldr_full - ldr_cut)
     signal = max(0.0, min(1.0, (ldr - ldr_cut) / span))
     return PicoTelemetry(
@@ -69,12 +92,19 @@ def _parse_telemetry(line: str, ldr_full: int = 900, ldr_cut: int = 50) -> PicoT
         ldr_raw=ldr,
         received_at=time.time(),
         fiber_signal=signal,
+        rotation_deg=rotation,
     )
 
 
 class PicoLink(ABC):
     @abstractmethod
-    def aim(self, pan: float, tilt: float, mode: PicoMode = PicoMode.TRACKING) -> None: ...
+    def aim(
+        self,
+        pan: float,
+        tilt: float,
+        mode: PicoMode = PicoMode.TRACKING,
+        rotation: float | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def telemetry(self) -> PicoTelemetry: ...
@@ -117,10 +147,16 @@ class RealPicoLink(PicoLink):
     def is_connected(self) -> bool:
         return self._serial is not None and self._serial.is_open
 
-    def aim(self, pan: float, tilt: float, mode: PicoMode = PicoMode.TRACKING) -> None:
+    def aim(
+        self,
+        pan: float,
+        tilt: float,
+        mode: PicoMode = PicoMode.TRACKING,
+        rotation: float | None = None,
+    ) -> None:
         if not self.is_connected():
             return
-        cmd = _format_command(pan, tilt, mode)
+        cmd = _format_command(pan, tilt, mode, rotation=rotation)
         try:
             assert self._serial is not None
             self._serial.write(cmd)
@@ -173,6 +209,8 @@ class MockPicoLink(PicoLink):
       - When mode == LOCKED, signal degrades over `severance_seconds`
       - After it reaches 0, stays at 0 (drone neutralized)
       - Distance jitters around `mock_distance_cm` to simulate ultrasonic noise
+      - Stepper rotation eases toward its target at `rotation_speed_deg_s`
+        (mirrors the real 28BYJ-48: ~50 deg/s at the default step rate)
       - All commands echoed to stdout if `verbose` is True
     """
 
@@ -181,22 +219,50 @@ class MockPicoLink(PicoLink):
         verbose: bool = False,
         mock_distance_cm: float = 150.0,
         severance_seconds: float = 4.0,
+        rotation_speed_deg_s: float = 50.0,
     ) -> None:
         self.verbose = verbose
         self.mock_distance_cm = mock_distance_cm
         self.severance_seconds = severance_seconds
+        self.rotation_speed_deg_s = rotation_speed_deg_s
         self._engage_started_at: float | None = None
         self._signal_floor = 1.0
         self._mode = PicoMode.IDLE
         self._last_pan = 90.0
         self._last_tilt = 90.0
+        self._rotation_current = 0.0
+        self._rotation_target = 0.0
+        self._rotation_last_t = time.time()
 
     def is_connected(self) -> bool:
         return True
 
-    def aim(self, pan: float, tilt: float, mode: PicoMode = PicoMode.TRACKING) -> None:
+    def _advance_rotation(self) -> None:
+        now = time.time()
+        dt = max(0.0, now - self._rotation_last_t)
+        self._rotation_last_t = now
+        delta = self._rotation_target - self._rotation_current
+        if delta == 0.0:
+            return
+        max_step = self.rotation_speed_deg_s * dt
+        if abs(delta) <= max_step:
+            self._rotation_current = self._rotation_target
+        else:
+            self._rotation_current += max_step if delta > 0 else -max_step
+
+    def aim(
+        self,
+        pan: float,
+        tilt: float,
+        mode: PicoMode = PicoMode.TRACKING,
+        rotation: float | None = None,
+    ) -> None:
         self._last_pan = pan
         self._last_tilt = tilt
+        if rotation is not None:
+            self._rotation_target = max(
+                ROTATION_MIN_DEG, min(ROTATION_MAX_DEG, rotation)
+            )
         prev = self._mode
         self._mode = mode
         if mode == PicoMode.LOCKED and prev != PicoMode.LOCKED:
@@ -204,7 +270,8 @@ class MockPicoLink(PicoLink):
         if mode != PicoMode.LOCKED:
             self._engage_started_at = None
         if self.verbose:
-            print(f"[mock-pico] P{pan:6.1f} T{tilt:6.1f} M{int(mode)}")
+            rot_str = "" if rotation is None else f" R{rotation:6.1f}"
+            print(f"[mock-pico] P{pan:6.1f} T{tilt:6.1f}{rot_str} M{int(mode)}")
 
     def telemetry(self) -> PicoTelemetry:
         signal = self._signal_floor
@@ -217,6 +284,8 @@ class MockPicoLink(PicoLink):
             self._signal_floor = min(1.0, self._signal_floor + 0.001)
             signal = self._signal_floor
 
+        self._advance_rotation()
+
         jitter = math.sin(time.time() * 7) * 1.5
         distance = self.mock_distance_cm + jitter
         ldr_raw = int(50 + signal * (900 - 50))
@@ -227,6 +296,7 @@ class MockPicoLink(PicoLink):
             ldr_raw=ldr_raw,
             received_at=time.time(),
             fiber_signal=signal,
+            rotation_deg=self._rotation_current,
         )
 
     def reset_severance(self) -> None:

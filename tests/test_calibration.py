@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from macbook.calibration import Calibration, CalibrationAnchor
+from macbook.calibration import Calibration, CalibrationAnchor, RotationAnchor
 
 
 class TestCalibration:
@@ -81,3 +81,62 @@ class TestCalibration:
     def test_load_missing_returns_default(self, tmp_path: Path):
         c = Calibration.load(tmp_path / "does_not_exist.json")
         assert c.anchors == []
+        assert c.rotation_anchors == []
+
+
+class TestRotationCalibration:
+    def test_empty_returns_rotation_center(self):
+        c = Calibration()
+        assert c.pixel_to_rotation(640, 360) == 0.0
+
+    def test_custom_rotation_center(self):
+        c = Calibration(rotation_center=15.0)
+        assert c.pixel_to_rotation(0, 0) == 15.0
+
+    def test_single_rotation_anchor_returned_clamped(self):
+        c = Calibration()
+        c.add_rotation(RotationAnchor(100, 100, 42.0))
+        assert c.pixel_to_rotation(900, 900) == 42.0
+
+    def test_rotation_anchors_independent_of_pan_tilt(self):
+        c = Calibration()
+        c.add(CalibrationAnchor(100, 100, 60, 60))
+        assert c.pixel_to_rotation(100, 100) == 0.0
+        assert c.pixel_to_servo(100, 100) == (60.0, 60.0)
+
+    def test_rotation_idw_interpolates(self):
+        c = Calibration()
+        c.add_rotation(RotationAnchor(0, 360, -90.0))
+        c.add_rotation(RotationAnchor(1280, 360, 90.0))
+        rot = c.pixel_to_rotation(640, 360)
+        assert rot == pytest.approx(0.0, abs=5.0)
+
+    def test_rotation_clamped_to_limits(self):
+        c = Calibration(rotation_min=-30.0, rotation_max=30.0)
+        c.add_rotation(RotationAnchor(100, 100, 200.0))
+        assert c.pixel_to_rotation(100, 100) == 30.0
+        c.rotation_anchors.clear()
+        c.add_rotation(RotationAnchor(100, 100, -200.0))
+        assert c.pixel_to_rotation(100, 100) == -30.0
+
+    def test_rotation_save_load_round_trip(self, tmp_calibration: Path):
+        c = Calibration(rotation_min=-90.0, rotation_max=90.0, rotation_center=5.0)
+        c.add_rotation(RotationAnchor(100.0, 200.0, -45.0))
+        c.add_rotation(RotationAnchor(900.0, 600.0, 30.0))
+        c.save(tmp_calibration)
+
+        c2 = Calibration.load(tmp_calibration)
+        assert c2.rotation_min == -90.0
+        assert c2.rotation_max == 90.0
+        assert c2.rotation_center == 5.0
+        assert len(c2.rotation_anchors) == 2
+        assert c2.rotation_anchors[0].rotation_angle == -45.0
+        assert c2.rotation_anchors[1].pixel_x == 900.0
+
+    def test_remove_nearest_rotation(self):
+        c = Calibration()
+        c.add_rotation(RotationAnchor(100, 100, 10))
+        c.add_rotation(RotationAnchor(900, 100, 50))
+        assert c.remove_nearest_rotation(105, 105) is True
+        assert len(c.rotation_anchors) == 1
+        assert c.rotation_anchors[0].pixel_x == 900
