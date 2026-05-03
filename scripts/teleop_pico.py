@@ -105,7 +105,15 @@ class _SerialOut:
         if mock:
             return
         import serial
-        self.ser = serial.Serial(port, baud, timeout=0)
+        # Disable HW flow control explicitly. Default for pyserial is
+        # already off, but being explicit avoids surprises across
+        # versions / OSes.
+        self.ser = serial.Serial(
+            port, baud,
+            timeout=0,
+            write_timeout=0.05,
+            rtscts=False, dsrdtr=False, xonxoff=False,
+        )
 
     def write(self, payload: bytes) -> None:
         if self.mock:
@@ -113,7 +121,30 @@ class _SerialOut:
             sys.stdout.flush()
             return
         assert self.ser is not None
-        self.ser.write(payload)
+        try:
+            self.ser.write(payload)
+        except Exception:
+            # write_timeout exceeded -- USB CDC backpressure.
+            # Best to just drop this command than hang the main loop;
+            # next tick will resend an updated position anyway.
+            pass
+
+    def drain_rx(self) -> None:
+        """Drop any unread bytes from the device.
+
+        We never read telemetry in this script, so without this the
+        kernel TTY RX buffer fills, USB CDC flow-control engages, and
+        our writes start blocking. Calling this once per tick keeps
+        the buffer near-empty.
+        """
+        if self.ser is None:
+            return
+        try:
+            n = self.ser.in_waiting
+            if n > 0:
+                self.ser.read(n)
+        except Exception:
+            pass
 
     def close(self) -> None:
         if self.ser is not None:
@@ -303,6 +334,12 @@ def teleop(args: argparse.Namespace) -> int:
             dt = now - last_tick
             if dt >= tick_dt:
                 last_tick = now
+                # Drop any unread telemetry from the Pico so the kernel
+                # TTY RX buffer doesn't fill up and back-pressure our
+                # writes via USB CDC flow control. (Without this, after
+                # ~2 minutes the script's main loop hangs for many
+                # seconds at a time waiting for write() to unblock.)
+                out.drain_rx()
                 # Walk pos toward target at max_rate deg/sec.
                 max_step = state.max_rate * dt
                 for axis in ("pan", "tilt"):

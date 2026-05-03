@@ -7,6 +7,8 @@ Pin map (see pico/README.md for wiring + power notes):
     GP1   tilt servo PWM      (50 Hz, hobby servo)
     GP2   HC-SR04 trigger     (output)
     GP3   HC-SR04 echo        (input, voltage-divided to 3.3V)
+    GP4   PIR / Fresnel       (input, internal pull-down so an
+                               unwired sensor reads safely as 0)
     GP6   stepper IN1         (28BYJ-48 via ULN2003)
     GP7   stepper IN2
     GP8   stepper IN3
@@ -21,9 +23,12 @@ Serial protocol (115200 baud over USB):
                     power-on position), mode 0-3.
                     R is OPTIONAL — if absent the stepper target is
                     unchanged (older host code keeps working).
-    Pico -> Host:   "D{cm}S{status}L{ldr}A{rot}\\n"
+    Pico -> Host:   "D{cm}S{status}L{ldr}A{rot}P{pir}\\n"
                     distance cm (-1 if invalid), status 0-3,
-                    LDR 0-1023, A = current stepper angle in degrees.
+                    LDR 0-1023, A = current stepper angle in degrees,
+                    P = PIR digital state (0 = clear, 1 = motion).
+                    P is APPENDED to keep older parsers (which only
+                    look up to A) working unchanged.
 
 Modes:
     0 = idle              LED off,    no buzzer, stepper coils de-energized
@@ -53,6 +58,7 @@ PAN_PIN = 0
 TILT_PIN = 1
 TRIG_PIN = 2
 ECHO_PIN = 3
+PIR_PIN = 4
 STEPPER_IN1 = 6
 STEPPER_IN2 = 7
 STEPPER_IN3 = 8
@@ -296,6 +302,11 @@ def main():
     ultrasonic = Ultrasonic(TRIG_PIN, ECHO_PIN)
     status_io = StatusOutput(LED_PIN, BUZZER_PIN)
     ldr = ADC(LDR_ADC_CHAN)
+    # PIR / Fresnel proximity sensor. Internal pull-down so a not-yet-
+    # connected pin reads safely as 0 (no spurious "motion" before the
+    # sensor is wired). Most HC-SR501-style modules drive the OUT line
+    # actively, so the pull-down doesn't fight them once connected.
+    pir = Pin(PIR_PIN, Pin.IN, Pin.PULL_DOWN)
 
     poll = select.poll()
     poll.register(sys.stdin, select.POLLIN)
@@ -339,9 +350,10 @@ def main():
             status_io.update(mode, fiber_compromised)
 
             cm_out = -1 if cm is None or cm < 0 else cm
+            pir_state = pir.value()
             print(
-                "D{:.1f}S{:d}L{:d}A{:.1f}".format(
-                    cm_out, mode, ldr_raw, stepper.angle_deg
+                "D{:.1f}S{:d}L{:d}A{:.1f}P{:d}".format(
+                    cm_out, mode, ldr_raw, stepper.angle_deg, pir_state
                 )
             )
 

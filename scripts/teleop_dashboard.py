@@ -40,12 +40,25 @@ MODE_NAMES = {0: "IDLE", 1: "TRACKING", 2: "SWEEP", 3: "LOCKED"}
 
 
 def _open_remote_tail(host: str, remote_path: str) -> subprocess.Popen:
+    # Use the remote shell's `dirname` (NOT Path.parent on the Mac --
+    # that would expand ~ to the local home). `mkdir -p $(dirname X)`
+    # creates the parent dir if missing, then `touch X` ensures the
+    # file exists so `tail -F` doesn't error before teleop_pico
+    # appends its first line. `set -e` makes the chain fail fast if
+    # mkdir fails so we don't pretend tail succeeded.
+    remote_cmd = (
+        f'set -e; '
+        f'p="{remote_path}"; '
+        f'mkdir -p "$(dirname "$p")"; '
+        f'touch "$p"; '
+        f'exec tail -n 1 -F "$p"'
+    )
     cmd = [
         "ssh",
         "-o", "ServerAliveInterval=15",
         "-o", "ConnectTimeout=5",
         host,
-        f"mkdir -p {remote_path!s}/.. 2>/dev/null; touch {remote_path}; tail -n 1 -F {remote_path}",
+        remote_cmd,
     ]
     return subprocess.Popen(
         cmd,
