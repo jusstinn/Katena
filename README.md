@@ -80,12 +80,28 @@ Katena/
 │   ├── setup_jetson.sh       # One-shot Jetson environment setup
 │   ├── verify_jetson.py      # Hardware/driver smoke test
 │   └── README.md             # SSH + transfer + troubleshooting
-├── scripts/                  # Cross-cutting verification scripts
+├── scripts/                  # Cross-cutting verification + helpers
 │   ├── verify_camera.py
 │   ├── verify_yolo.py
 │   ├── verify_serial.py
 │   ├── verify_foundry.py
-│   └── verify_all.py         # Run everything before each demo
+│   ├── verify_all.py         # Run all verifications before each demo
+│   ├── seed_engagements.py   # Pre-mint demo data for dashboard
+│   └── run_tests.sh          # Sanity gate: compile + tests + (optional) smoke
+├── tests/                    # 123 unit tests, ~3s, no hardware needed
+│   ├── conftest.py           # MicroPython `machine` shim + shared fixtures
+│   ├── test_engagement.py
+│   ├── test_state_machine.py
+│   ├── test_logger.py
+│   ├── test_calibration.py
+│   ├── test_config.py
+│   ├── test_detector.py
+│   ├── test_overlay.py
+│   ├── test_serial_link.py
+│   └── test_pico_firmware.py
+├── dashboard.py              # Streamlit local twin of Foundry view
+├── Makefile                  # `make test`, `make tracker`, etc.
+├── pyproject.toml            # pytest + coverage config
 ├── downloads/                # Local installers (Thonny .pkg) — gitignored
 └── paper/                    # LaTeX physics writeup (cladding-breach math)
 ```
@@ -99,13 +115,26 @@ cd ~/Desktop/Katena
 source .venv/bin/activate
 ```
 
-Daily smoke test:
+Daily commands:
 
 ```bash
-python scripts/verify_all.py
+make test           # 123 unit tests, ~3s, no hardware needed
+make tracker        # run the live tracker in mock Pico mode
+make calibrate      # run the calibration teleop tool
+make dashboard      # open the Streamlit ops dashboard
+make seed           # pre-seed dashboard with demo engagements
+make smoke          # camera + YOLO + serial + Foundry live checks
+make help           # all available commands
 ```
 
-Expected: camera, YOLO, serial, foundry all green.
+Before each commit, run:
+
+```bash
+bash scripts/run_tests.sh
+```
+
+This runs syntax check + 123 unit tests in under 5 seconds. Add
+`--smoke` to also exercise camera/YOLO/serial/Foundry live.
 
 ### Configure Foundry
 

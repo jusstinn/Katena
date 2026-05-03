@@ -36,12 +36,18 @@ foundry_token.txt
 *~
 
 # --- Project artifacts ---
-downloads/                 # Local-only installers (Thonny .pkg, etc.)
-runs/                      # YOLO training output
-*.engine                   # TensorRT engines
-calibration.json           # Local servo calibration (machine-specific)
-engagements.jsonl          # Local engagement log (also goes to Foundry)
-recordings/                # Demo video clips
+# Local-only installers (Thonny .pkg, etc.)
+downloads/
+# YOLO training output
+runs/
+# TensorRT engines
+*.engine
+# Local servo calibration (machine-specific)
+calibration.json
+# Local engagement log (also goes to Foundry)
+engagements.jsonl
+# Demo video clips and screenshots
+recordings/
 
 # --- Generated OSDK packages ---
 osdk_*.whl
@@ -56,3 +62,10 @@ yolov8*.pt
 # --- Logs ---
 *.log
 logs/
+
+# --- Test artifacts ---
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/

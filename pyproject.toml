@@ -1,0 +1,33 @@
+[project]
+name = "katena"
+version = "0.1.0"
+description = "FOG Drone Fiber-Tether Neutralization System"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-q",
+    "--strict-markers",
+    "--tb=short",
+    "-ra",
+]
+markers = [
+    "slow: tests that take more than 1 second",
+    "hardware: tests that require physical hardware (excluded by default)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:google.*",
+    "ignore::DeprecationWarning:pandas.*",
+]
+
+[tool.coverage.run]
+source = ["macbook"]
+omit = [
+    "*/calibration_tool.py",
+    "*/main_tracker.py",
+    "*/__init__.py",
+]
