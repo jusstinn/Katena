@@ -508,6 +508,13 @@ def main() -> int:
                         help="Aim zone width as fraction of drone bbox width.")
     parser.add_argument("--fire-zone-h", type=float, default=1.0,
                         help="Aim zone height as fraction of drone bbox height.")
+    parser.add_argument("--fire-zone-drop", type=float, default=1.4,
+                        help="How far below the drone the aim zone is centered, "
+                             "as a multiple of the zone's half-height. 1.0 puts "
+                             "zone-top exactly on bbox-bottom; 1.4 (default) "
+                             "leaves ~0.2*bbox_h of clear air; >2 puts the laser "
+                             "well under the drone (use this if the fiber exits "
+                             "from a long tail).")
     parser.add_argument("--fire-amp-x", type=float, default=0.7,
                         help="Sweep X amplitude as fraction of zone half-width.")
     parser.add_argument("--fire-amp-y", type=float, default=0.7,
@@ -738,6 +745,7 @@ def main() -> int:
             amp_y_frac=args.fire_amp_y,
             freq_x_hz=args.fire_freq_x,
             freq_y_hz=args.fire_freq_y,
+            zone_drop_frac=args.fire_zone_drop,
         )
         fire_ctl = FireController(
             arm_conf=args.fire_arm_conf,
