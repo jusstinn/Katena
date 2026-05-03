@@ -1,0 +1,58 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Secrets ---
+.env
+.env.local
+*.pem
+*.key
+foundry_token.txt
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Project artifacts ---
+downloads/                 # Local-only installers (Thonny .pkg, etc.)
+runs/                      # YOLO training output
+*.engine                   # TensorRT engines
+calibration.json           # Local servo calibration (machine-specific)
+engagements.jsonl          # Local engagement log (also goes to Foundry)
+recordings/                # Demo video clips
+
+# --- Generated OSDK packages ---
+osdk_*.whl
+osdk_drone_neutralizer/
+
+# --- Pre-trained model weights (re-downloadable) ---
+# Comment out next line if you want to commit the weights
+yolov8n.pt
+yolov8*.pt
+*.onnx
+
+# --- Logs ---
+*.log
+logs/
