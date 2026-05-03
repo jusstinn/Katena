@@ -11,6 +11,13 @@
 
 ## Live demo
 
+[![Watch the BlackFiber demo on YouTube](https://img.youtube.com/vi/Dcbhx9owgbg/maxresdefault.jpg)](https://youtu.be/Dcbhx9owgbg)
+
+> ▶ **[Full demo on YouTube](https://youtu.be/Dcbhx9owgbg)** — narrated,
+> with the dashboard, calibration, and live engagement.
+
+Inline preview (5 s loop, generated from the bench-rig run):
+
 ![BlackFiber closed-loop drone neutralization demo](DroneKill.gif)
 
 > Closed-loop run on the bench rig: drone-trained YOLOv8 on a Jetson
