@@ -102,10 +102,11 @@ class SweepPlanner:
         width_frac: float = 0.5,
         height_frac: float = 1.0,
         # Sweep amplitude as a fraction of the zone's half-extents.
-        # 0.45/0.45 keeps the lissajous loop small and visually
-        # "concentrated under the drone" instead of filling the
-        # full bbox-sized zone.
-        amp_x_frac: float = 0.45,
+        # X is wider than Y (~2x) so the lissajous reads as a flat
+        # horizontal scan under the drone -- visually like a laser
+        # raking sideways across the tether anchor point -- rather
+        # than a tall, narrow loop.
+        amp_x_frac: float = 0.85,
         amp_y_frac: float = 0.45,
         # Default frequencies are deliberately LOW (~1Hz). Hobby
         # servos (SG90 / MG90S) and especially heavier MG996Rs cannot
