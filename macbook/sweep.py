@@ -118,6 +118,15 @@ class SweepPlanner:
         # 1.0 = zone top exactly touches drone bottom (no gap).
         # 0.0 = zone centred on the drone.
         zone_drop_frac: float = 1.4,
+        # ---- Smoothing (added to kill trail jitter) -----------------
+        # YOLO bboxes jump a few px frame-to-frame even on a stationary
+        # drone, and the predictor's velocity flips sign on those jumps.
+        # Without smoothing the zone CENTRE skips and the zone ROTATION
+        # twitches, making the lissajous trail look chunky. EWMA over
+        # the bbox centre/size and the velocity vector turns these
+        # frame-to-frame jitters into a smooth glide.
+        bbox_smoothing_alpha: float = 0.35,
+        velocity_smoothing_alpha: float = 0.15,
     ) -> None:
         self.pattern = pattern
         self.width_frac = float(width_frac)
@@ -132,10 +141,32 @@ class SweepPlanner:
         # on the drone; 1.0 = the zone's TOP touches the drone's bottom
         # (zone fully below). Default 0.6 = mostly-below, slight overlap.
         self.zone_drop_frac = float(zone_drop_frac)
+        if not (0.0 < bbox_smoothing_alpha <= 1.0):
+            raise ValueError("bbox_smoothing_alpha must be in (0, 1]")
+        if not (0.0 < velocity_smoothing_alpha <= 1.0):
+            raise ValueError("velocity_smoothing_alpha must be in (0, 1]")
+        self.bbox_smoothing_alpha = float(bbox_smoothing_alpha)
+        self.velocity_smoothing_alpha = float(velocity_smoothing_alpha)
+        self._sm_cx: float | None = None
+        self._sm_cy: float | None = None
+        self._sm_w: float | None = None
+        self._sm_h: float | None = None
+        self._sm_vx: float = 0.0
+        self._sm_vy: float = 0.0
 
     # ------------------------------------------------------------------
     # Zone calculation
     # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Drop smoothing state. Call when the lock is lost or swapped
+        so we don't drag stale zone position into the next target."""
+        self._sm_cx = None
+        self._sm_cy = None
+        self._sm_w = None
+        self._sm_h = None
+        self._sm_vx = 0.0
+        self._sm_vy = 0.0
 
     def zone(
         self,
@@ -143,10 +174,33 @@ class SweepPlanner:
         velocity_px_per_s: tuple[float, float] = (0.0, 0.0),
     ) -> AimZone:
         x1, y1, x2, y2 = bbox
-        bw = max(1, x2 - x1)
-        bh = max(1, y2 - y1)
-        cx = 0.5 * (x1 + x2)
-        cy = 0.5 * (y1 + y2)
+        raw_bw = max(1, x2 - x1)
+        raw_bh = max(1, y2 - y1)
+        raw_cx = 0.5 * (x1 + x2)
+        raw_cy = 0.5 * (y1 + y2)
+        raw_vx, raw_vy = velocity_px_per_s
+
+        # EWMA over the bbox + velocity. First frame seeds the state.
+        a_b = self.bbox_smoothing_alpha
+        a_v = self.velocity_smoothing_alpha
+        if self._sm_cx is None:
+            self._sm_cx, self._sm_cy = raw_cx, raw_cy
+            self._sm_w, self._sm_h = float(raw_bw), float(raw_bh)
+            self._sm_vx, self._sm_vy = raw_vx, raw_vy
+        else:
+            self._sm_cx = (1 - a_b) * self._sm_cx + a_b * raw_cx
+            self._sm_cy = (1 - a_b) * self._sm_cy + a_b * raw_cy
+            self._sm_w = (1 - a_b) * self._sm_w + a_b * raw_bw
+            self._sm_h = (1 - a_b) * self._sm_h + a_b * raw_bh
+            self._sm_vx = (1 - a_v) * self._sm_vx + a_v * raw_vx
+            self._sm_vy = (1 - a_v) * self._sm_vy + a_v * raw_vy
+
+        cx = self._sm_cx
+        cy = self._sm_cy
+        bw = max(1.0, self._sm_w)
+        bh = max(1.0, self._sm_h)
+        vx = self._sm_vx
+        vy = self._sm_vy
 
         half_w = 0.5 * self.width_frac * bw
         half_h = 0.5 * self.height_frac * bh
@@ -156,7 +210,6 @@ class SweepPlanner:
         # + zone_half_h * zone_drop_frac).
         offset_along_axis = 0.5 * bh + self.zone_drop_frac * half_h
 
-        vx, vy = velocity_px_per_s
         speed = math.hypot(vx, vy)
         if self.angle_to_velocity and speed > self.velocity_eps_px_per_s:
             # Cable trails OPPOSITE to motion direction. Velocity
@@ -254,6 +307,13 @@ def draw_fire_overlay(
     laser-OFF gap the trail naturally fades out instead of hanging on
     forever (or being wiped instantly).
 
+    All trail segments are drawn onto a SINGLE overlay copy and blended
+    once. The age fade is encoded in the per-segment color intensity
+    and line thickness, not in the per-segment alpha. This is much
+    faster (one frame.copy() + one addWeighted per frame instead of N
+    of each) and produces a cleaner visual gradient with no overlapping
+    alpha artefacts where adjacent segments share endpoints.
+
     `zone` and `laser_xy` may be None during cooldown / no-target frames,
     in which case only the trail is drawn -- this is what keeps the
     fading arc visible even after the laser disengages.
@@ -271,14 +331,14 @@ def draw_fire_overlay(
         overlay = frame.copy()
         cv2.polylines(overlay, [pts], isClosed=True, color=(0, 0, 255),
                       thickness=1, lineType=cv2.LINE_AA)
-        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
     items = [(t, p) for (t, p) in trail if (t_now - t) <= trail_max_age_s]
     n = len(items)
     if n >= 2:
-        oldest_age = t_now - items[0][0]
-        newest_age = t_now - items[-1][0]
-        for i in range(n - 1, 0, -1):
+        overlay = frame.copy()
+        any_drawn = False
+        for i in range(1, n):
             (t1, p1) = items[i - 1]
             (t2, p2) = items[i]
             x1i, y1i = int(round(p1[0])), int(round(p1[1]))
@@ -287,12 +347,16 @@ def draw_fire_overlay(
                     or x2i < 0 or x2i >= w or y2i < 0 or y2i >= h):
                 continue
             seg_age = t_now - 0.5 * (t1 + t2)
-            life_frac = max(0.0, 1.0 - seg_age / max(trail_max_age_s, 1e-6))
-            alpha = max(0.05, life_frac)
-            overlay = frame.copy()
-            cv2.line(overlay, (x1i, y1i), (x2i, y2i),
-                     (0, 80, 255), 2, cv2.LINE_AA)
-            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+            life = max(0.0, 1.0 - seg_age / max(trail_max_age_s, 1e-6))
+            r = int(round(255 * life))
+            g = int(round(110 * life))
+            color = (0, g, r)  # BGR: red core fading to dim
+            thickness = 3 if life > 0.75 else (2 if life > 0.30 else 1)
+            cv2.line(overlay, (x1i, y1i), (x2i, y2i), color,
+                     thickness, cv2.LINE_AA)
+            any_drawn = True
+        if any_drawn:
+            cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
     if laser_xy is not None:
         lx_i, ly_i = int(round(laser_xy[0])), int(round(laser_xy[1]))

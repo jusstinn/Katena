@@ -360,10 +360,11 @@ def main() -> int:
                         help="Sweep X frequency in Hz (keep <= ~1.5 for real servos).")
     parser.add_argument("--fire-freq-y", type=float, default=0.7,
                         help="Sweep Y frequency in Hz (keep <= ~1.5 for real servos).")
-    parser.add_argument("--fire-trail-len", type=int, default=120,
-                        help="Number of recent aim points to render as the fading trail. "
-                             "120 ~ 4s of trail at 30 fps; segments older than ~2s "
-                             "are alpha-faded out by the renderer regardless.")
+    parser.add_argument("--fire-trail-len", type=int, default=300,
+                        help="Deque capacity for the trail. With sub-frame "
+                             "interpolation we add ~30 samples/sec regardless "
+                             "of producer fps, so 300 ~ 10s of headroom; the "
+                             "renderer prunes anything older than ~2s anyway.")
     parser.add_argument("--fire-arm-conf", type=float, default=0.45,
                         help="Detection conf required (sustained) to ARM the laser. "
                              "Lowered from 0.55 because we now arm on the fused "
@@ -656,6 +657,9 @@ def main() -> int:
                         predictor.reset()
                     if fire_ctl is not None:
                         fire_ctl.reset()
+                    if sweep_planner is not None:
+                        sweep_planner.reset()
+                    laser_trail.clear()
                 fused_for_aim = fr.detection
                 if lock_filter.in_suspicion:
                     _shadowed_text(
@@ -713,8 +717,31 @@ def main() -> int:
                         tracked.velocity if tracked is not None else (0.0, 0.0)
                     )
                     zone = sweep_planner.zone(fused_for_aim.bbox, velocity)
-                    laser_xy = sweep_planner.aim_point(time.perf_counter(), zone)
-                    laser_trail.append((time.perf_counter(), laser_xy))
+                    now_t = time.perf_counter()
+                    # Sub-frame trail interpolation. At low end-to-end
+                    # fps (jetson ~6) a single sample per frame is too
+                    # sparse for a 1Hz lissajous -- the trail looks
+                    # like big disjointed jumps. Densify the segment
+                    # between the previous trail sample and `now_t`
+                    # by sampling the (already-smoothed) sweep curve
+                    # at ~30 sub-fps so the trail reads as a smooth
+                    # arc no matter how slow the producer loop is.
+                    if laser_trail:
+                        last_t = laser_trail[-1][0]
+                        dt = now_t - last_t
+                        if dt > 0.5:
+                            laser_xy = sweep_planner.aim_point(now_t, zone)
+                            laser_trail.append((now_t, laser_xy))
+                        else:
+                            n_sub = max(1, min(10, int(round(dt / 0.033))))
+                            for k in range(1, n_sub + 1):
+                                t_sub = last_t + (k / n_sub) * dt
+                                p_sub = sweep_planner.aim_point(t_sub, zone)
+                                laser_trail.append((t_sub, p_sub))
+                            laser_xy = laser_trail[-1][1]
+                    else:
+                        laser_xy = sweep_planner.aim_point(now_t, zone)
+                        laser_trail.append((now_t, laser_xy))
                 # Always render whatever trail we have. The renderer
                 # age-fades old segments, so during cooldown the arc
                 # gracefully fades to nothing instead of being wiped on
