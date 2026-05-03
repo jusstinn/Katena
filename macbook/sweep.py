@@ -101,8 +101,12 @@ class SweepPlanner:
         pattern: SweepPattern = "lissajous",
         width_frac: float = 0.5,
         height_frac: float = 1.0,
-        amp_x_frac: float = 0.7,
-        amp_y_frac: float = 0.7,
+        # Sweep amplitude as a fraction of the zone's half-extents.
+        # 0.45/0.45 keeps the lissajous loop small and visually
+        # "concentrated under the drone" instead of filling the
+        # full bbox-sized zone.
+        amp_x_frac: float = 0.45,
+        amp_y_frac: float = 0.45,
         # Default frequencies are deliberately LOW (~1Hz). Hobby
         # servos (SG90 / MG90S) and especially heavier MG996Rs cannot
         # cleanly reverse direction much faster than this without
@@ -111,7 +115,12 @@ class SweepPlanner:
         # rather than "broken jitter".
         freq_x_hz: float = 1.0,
         freq_y_hz: float = 0.7,
-        angle_to_velocity: bool = True,
+        # Default OFF: keep the zone pinned straight down ("south")
+        # under the drone so the trail visually sits on/under the
+        # airframe regardless of drone motion. Velocity-aligned zones
+        # rotate with the noisy velocity vector and look like the
+        # trail is "behind" the drone instead of beneath it.
+        angle_to_velocity: bool = False,
         velocity_eps_px_per_s: float = 60.0,
         # 1.4 puts the zone TOP roughly 0.2 * bbox_height below the
         # drone bbox (clear air gap, no overlap with the airframe).
@@ -240,12 +249,17 @@ class SweepPlanner:
     # Trajectory sampling
     # ------------------------------------------------------------------
 
-    def aim_point(self, t: float, zone: AimZone) -> tuple[float, float]:
-        """Return the laser's aim pixel at time t inside the zone."""
+    def aim_point_local(self, t: float, zone: AimZone) -> tuple[float, float]:
+        """Return the aim point in zone-LOCAL coordinates (before rotation
+        and translation). The local frame has +x along the zone's width
+        axis and +y along its height axis; (0, 0) is the zone centre.
+
+        Storing trail samples in this frame lets the renderer re-anchor
+        them to the CURRENT zone every frame so the trail doesn't streak
+        across the screen as the drone moves."""
         ax = zone.half_w * self.amp_x_frac
         ay = zone.half_h * self.amp_y_frac
 
-        # Local coordinates inside the zone (before rotation)
         if self.pattern == "lissajous":
             lx = ax * math.sin(2 * math.pi * self.freq_x_hz * t)
             ly = ay * math.sin(2 * math.pi * self.freq_y_hz * t + math.pi / 2)
@@ -259,19 +273,29 @@ class SweepPlanner:
             lx = ax * math.cos(2 * math.pi * self.freq_x_hz * t)
             ly = ay * math.sin(2 * math.pi * self.freq_x_hz * t)
         elif self.pattern == "figure_eight":
-            # Same x freq, doubled y freq -> classic infinity sign
             lx = ax * math.sin(2 * math.pi * self.freq_x_hz * t)
             ly = ay * math.sin(4 * math.pi * self.freq_x_hz * t) * 0.5
         else:  # "static"
             lx = 0.0
             ly = 0.0
+        return lx, ly
 
-        # Rotate by the zone angle and translate to zone centre
+    @staticmethod
+    def local_to_screen(
+        local_xy: tuple[float, float],
+        zone: AimZone,
+    ) -> tuple[float, float]:
+        """Map a zone-local (lx, ly) point to absolute screen pixels."""
+        lx, ly = local_xy
         c = math.cos(zone.angle_rad)
         s = math.sin(zone.angle_rad)
         wx = zone.center[0] + lx * c - ly * s
         wy = zone.center[1] + lx * s + ly * c
         return wx, wy
+
+    def aim_point(self, t: float, zone: AimZone) -> tuple[float, float]:
+        """Return the laser's aim pixel at time t inside the zone."""
+        return self.local_to_screen(self.aim_point_local(t, zone), zone)
 
     def peak_speed_px_per_s(self, zone: AimZone) -> float:
         """Worst-case px/sec the aim point will move. Useful as a
@@ -294,29 +318,26 @@ class SweepPlanner:
 def draw_fire_overlay(
     frame,                                        # np.ndarray
     zone: AimZone | None,
-    trail,                                        # deque[(t, (x, y))]
+    trail,                                        # deque[(t, (lx, ly))] in zone-LOCAL coords
     laser_xy: tuple[float, float] | None,
     *,
-    trail_max_age_s: float = 2.0,
+    trail_max_age_s: float = 1.2,
     now: float | None = None,
 ) -> None:
     """Draw the aim zone outline + age-faded laser trail + current dot.
 
-    The trail is rendered from the existing `(t, point)` deque; entries
-    older than `trail_max_age_s` are skipped so that during a long
-    laser-OFF gap the trail naturally fades out instead of hanging on
-    forever (or being wiped instantly).
+    `trail` stores points in **zone-LOCAL coordinates** (offsets from
+    the current zone centre, before rotation). Each frame we re-anchor
+    the trail to the *current* zone via `local_to_screen` so the trail
+    stays compactly under the drone instead of streaking across the
+    screen as the drone moves. If `zone` is None we have nothing to
+    anchor against, so the trail isn't drawn that frame -- it just
+    waits for the next zone (or naturally ages out of the deque).
 
-    All trail segments are drawn onto a SINGLE overlay copy and blended
-    once. The age fade is encoded in the per-segment color intensity
-    and line thickness, not in the per-segment alpha. This is much
-    faster (one frame.copy() + one addWeighted per frame instead of N
-    of each) and produces a cleaner visual gradient with no overlapping
-    alpha artefacts where adjacent segments share endpoints.
-
-    `zone` and `laser_xy` may be None during cooldown / no-target frames,
-    in which case only the trail is drawn -- this is what keeps the
-    fading arc visible even after the laser disengages.
+    All trail segments are painted onto a single overlay copy and
+    blended once. Age fade is encoded in per-segment color intensity
+    and line thickness, not in per-segment alpha; this is fast and
+    produces a clean gradient with no overlapping-alpha artefacts.
     """
     import cv2
     import numpy as np
@@ -334,15 +355,18 @@ def draw_fire_overlay(
         cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
     items = [(t, p) for (t, p) in trail if (t_now - t) <= trail_max_age_s]
-    n = len(items)
-    if n >= 2:
+    if zone is not None and len(items) >= 2:
+        # Re-anchor every stored local point to the current zone.
+        screen_pts = [SweepPlanner.local_to_screen(p, zone) for (_, p) in items]
         overlay = frame.copy()
         any_drawn = False
-        for i in range(1, n):
-            (t1, p1) = items[i - 1]
-            (t2, p2) = items[i]
-            x1i, y1i = int(round(p1[0])), int(round(p1[1]))
-            x2i, y2i = int(round(p2[0])), int(round(p2[1]))
+        for i in range(1, len(items)):
+            t1 = items[i - 1][0]
+            t2 = items[i][0]
+            sx1, sy1 = screen_pts[i - 1]
+            sx2, sy2 = screen_pts[i]
+            x1i, y1i = int(round(sx1)), int(round(sy1))
+            x2i, y2i = int(round(sx2)), int(round(sy2))
             if (x1i < 0 or x1i >= w or y1i < 0 or y1i >= h
                     or x2i < 0 or x2i >= w or y2i < 0 or y2i >= h):
                 continue

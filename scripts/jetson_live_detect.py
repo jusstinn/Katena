@@ -206,9 +206,9 @@ def _draw_aim(frame: np.ndarray, det: Detection | None) -> None:
     _shadowed_text(frame, "AIM", (ax + 16, ay + 4), scale=0.45, color=_RED, thickness=1)
 
 
-def _draw_fire_overlay(frame, zone, trail, laser_xy) -> None:
+def _draw_fire_overlay(frame, zone, trail, laser_xy, *, max_age_s: float = 1.2) -> None:
     from macbook.sweep import draw_fire_overlay
-    draw_fire_overlay(frame, zone, trail, laser_xy)
+    draw_fire_overlay(frame, zone, trail, laser_xy, trail_max_age_s=max_age_s)
 
 
 def _draw_fire_status(frame, decision) -> None:
@@ -360,11 +360,16 @@ def main() -> int:
                         help="Sweep X frequency in Hz (keep <= ~1.5 for real servos).")
     parser.add_argument("--fire-freq-y", type=float, default=0.7,
                         help="Sweep Y frequency in Hz (keep <= ~1.5 for real servos).")
-    parser.add_argument("--fire-trail-len", type=int, default=300,
+    parser.add_argument("--fire-trail-len", type=int, default=200,
                         help="Deque capacity for the trail. With sub-frame "
                              "interpolation we add ~30 samples/sec regardless "
-                             "of producer fps, so 300 ~ 10s of headroom; the "
-                             "renderer prunes anything older than ~2s anyway.")
+                             "of producer fps, so 200 ~ 6.5s of headroom; "
+                             "the renderer prunes by --fire-trail-max-age.")
+    parser.add_argument("--fire-trail-max-age", type=float, default=1.2,
+                        help="Seconds of trail kept visible (older samples "
+                             "are alpha-faded out). Lower = more compact "
+                             "trail concentrated under the drone; higher = "
+                             "longer fading tail. Default 1.2s.")
     parser.add_argument("--fire-arm-conf", type=float, default=0.45,
                         help="Detection conf required (sustained) to ARM the laser. "
                              "Lowered from 0.55 because we now arm on the fused "
@@ -726,27 +731,38 @@ def main() -> int:
                     # by sampling the (already-smoothed) sweep curve
                     # at ~30 sub-fps so the trail reads as a smooth
                     # arc no matter how slow the producer loop is.
+                    #
+                    # Trail samples are stored in ZONE-LOCAL coords so
+                    # the renderer can re-anchor them to the current
+                    # zone every frame -- keeps the trail under the
+                    # drone instead of streaking across the screen as
+                    # the drone moves.
                     if laser_trail:
                         last_t = laser_trail[-1][0]
                         dt = now_t - last_t
                         if dt > 0.5:
-                            laser_xy = sweep_planner.aim_point(now_t, zone)
-                            laser_trail.append((now_t, laser_xy))
+                            local_xy = sweep_planner.aim_point_local(now_t, zone)
+                            laser_trail.append((now_t, local_xy))
                         else:
                             n_sub = max(1, min(10, int(round(dt / 0.033))))
                             for k in range(1, n_sub + 1):
                                 t_sub = last_t + (k / n_sub) * dt
-                                p_sub = sweep_planner.aim_point(t_sub, zone)
-                                laser_trail.append((t_sub, p_sub))
-                            laser_xy = laser_trail[-1][1]
+                                local_sub = sweep_planner.aim_point_local(t_sub, zone)
+                                laser_trail.append((t_sub, local_sub))
                     else:
-                        laser_xy = sweep_planner.aim_point(now_t, zone)
-                        laser_trail.append((now_t, laser_xy))
+                        local_xy = sweep_planner.aim_point_local(now_t, zone)
+                        laser_trail.append((now_t, local_xy))
+                    laser_xy = sweep_planner.local_to_screen(
+                        laser_trail[-1][1], zone,
+                    )
                 # Always render whatever trail we have. The renderer
                 # age-fades old segments, so during cooldown the arc
                 # gracefully fades to nothing instead of being wiped on
                 # the very next frame.
-                _draw_fire_overlay(frame, zone, laser_trail, laser_xy)
+                _draw_fire_overlay(
+                    frame, zone, laser_trail, laser_xy,
+                    max_age_s=args.fire_trail_max_age,
+                )
                 _draw_fire_status(frame, fire_decision)
 
             now = time.perf_counter()

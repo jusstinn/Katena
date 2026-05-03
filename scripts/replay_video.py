@@ -153,9 +153,9 @@ def _draw_yolo_boxes(
     return out
 
 
-def _draw_fire_overlay(frame, zone, trail, laser_xy) -> None:
+def _draw_fire_overlay(frame, zone, trail, laser_xy, *, max_age_s: float = 1.2) -> None:
     from macbook.sweep import draw_fire_overlay
-    draw_fire_overlay(frame, zone, trail, laser_xy)
+    draw_fire_overlay(frame, zone, trail, laser_xy, trail_max_age_s=max_age_s)
 
 
 def _draw_fire_status(frame, decision) -> None:
@@ -325,10 +325,13 @@ def main() -> int:
                         help="Sweep X frequency in Hz (keep <= ~1.5 for real servos).")
     parser.add_argument("--fire-freq-y", type=float, default=0.7,
                         help="Sweep Y frequency in Hz (keep <= ~1.5 for real servos).")
-    parser.add_argument("--fire-trail-len", type=int, default=300,
+    parser.add_argument("--fire-trail-len", type=int, default=200,
                         help="Deque capacity for the trail. With sub-frame "
                              "interpolation we add ~30 samples/sec regardless "
-                             "of producer fps; renderer prunes >~2s old.")
+                             "of producer fps; renderer prunes by max-age.")
+    parser.add_argument("--fire-trail-max-age", type=float, default=1.2,
+                        help="Seconds of trail kept visible. Lower = more "
+                             "compact trail under the drone (default 1.2s).")
     parser.add_argument("--fire-arm-conf", type=float, default=0.45,
                         help="Detection conf needed (sustained) to ARM. Down from "
                              "0.55 because gating uses the fused detection conf now, "
@@ -624,29 +627,35 @@ def main() -> int:
                     )
                     zone = sweep_planner.zone(fused_for_aim.bbox, velocity)
                     now_t = time.perf_counter()
-                    # Sub-frame trail interpolation -- see jetson_live
-                    # for the reasoning. Same code path so both renders
-                    # produce the same visual.
+                    # Sub-frame trail interpolation + zone-local trail
+                    # storage so the trail stays compact under the
+                    # drone instead of streaking across the screen.
+                    # Same code path as jetson_live.
                     if laser_trail:
                         last_t = laser_trail[-1][0]
                         dt = now_t - last_t
                         if dt > 0.5:
-                            laser_xy = sweep_planner.aim_point(now_t, zone)
-                            laser_trail.append((now_t, laser_xy))
+                            local_xy = sweep_planner.aim_point_local(now_t, zone)
+                            laser_trail.append((now_t, local_xy))
                         else:
                             n_sub = max(1, min(10, int(round(dt / 0.033))))
                             for k in range(1, n_sub + 1):
                                 t_sub = last_t + (k / n_sub) * dt
-                                p_sub = sweep_planner.aim_point(t_sub, zone)
-                                laser_trail.append((t_sub, p_sub))
-                            laser_xy = laser_trail[-1][1]
+                                local_sub = sweep_planner.aim_point_local(t_sub, zone)
+                                laser_trail.append((t_sub, local_sub))
                     else:
-                        laser_xy = sweep_planner.aim_point(now_t, zone)
-                        laser_trail.append((now_t, laser_xy))
+                        local_xy = sweep_planner.aim_point_local(now_t, zone)
+                        laser_trail.append((now_t, local_xy))
+                    laser_xy = sweep_planner.local_to_screen(
+                        laser_trail[-1][1], zone,
+                    )
                 # Render even on disengage frames -- the renderer
                 # age-fades old segments so the arc disappears
                 # gracefully instead of being wiped instantly.
-                _draw_fire_overlay(frame, zone, laser_trail, laser_xy)
+                _draw_fire_overlay(
+                    frame, zone, laser_trail, laser_xy,
+                    max_age_s=args.fire_trail_max_age,
+                )
                 _draw_fire_status(frame, fire_decision)
 
             now = time.perf_counter()
