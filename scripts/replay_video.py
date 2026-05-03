@@ -368,6 +368,10 @@ def main() -> int:
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0,
                         help="Stop after N frames (0 = run to end)")
+    parser.add_argument("--rotate-180", action="store_true",
+                        help="Rotate every frame 180deg right after read. Use this "
+                             "to replay a clip recorded with the camera physically "
+                             "mounted upside down so detection sees an upright frame.")
     parser.add_argument("--no-window", action="store_true",
                         help="Headless: process the file without showing the preview window")
     args = parser.parse_args()
@@ -514,6 +518,8 @@ def main() -> int:
         ret, fr = cap.read()
         if not ret:
             return False, None
+        if args.rotate_180:
+            fr = cv2.rotate(fr, cv2.ROTATE_180)
         frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
         return True, fr
 

@@ -418,6 +418,33 @@ def main() -> int:
                         help="Use the CSI ribbon camera via nvarguscamerasrc")
     parser.add_argument("--gst", default="",
                         help="Custom GStreamer pipeline string (overrides --csi/--index)")
+    parser.add_argument("--rotate-180", action="store_true",
+                        help="Rotate the camera frame 180deg right after capture. "
+                             "Use this when the camera is physically mounted upside "
+                             "down. Applied BEFORE detection, MJPEG and recording, so "
+                             "everything downstream (calibration, sweep planner, Pico "
+                             "commands) sees an upright frame.")
+    parser.add_argument("--pico-port", default=None,
+                        help="Serial port for the Pico (e.g. /dev/ttyACM0). When set, "
+                             "the FIRE controller will physically aim the laser via "
+                             "the calibration map. Requires --cal and --fire.")
+    parser.add_argument("--pico-mock", action="store_true",
+                        help="Use a mock Pico link (no hardware). Logs commands but "
+                             "doesn't open a serial port. Useful for desk testing.")
+    parser.add_argument("--cal", type=Path, default=PROJECT_ROOT / "calibration.json",
+                        help="Path to the pixel->servo calibration JSON. Required "
+                             "when --pico-port or --pico-mock is set. Build it with "
+                             "scripts/calibration_remote.py.")
+    parser.add_argument("--pico-rate-hz", type=float, default=30.0,
+                        help="Cap how often we send aim commands to the Pico (default "
+                             "30 Hz). The servos can't physically slew faster than the "
+                             "Pico's own update loop anyway.")
+    parser.add_argument("--pico-track-mode", default="tracking",
+                        choices=["off", "tracking"],
+                        help="What to send when we have a target lock but the FIRE "
+                             "state isn't armed. 'tracking' slow-follows the predicted "
+                             "aim point so the gimbal stays roughly on target. 'off' "
+                             "only commands the Pico when armed (laser_on=True).")
     parser.add_argument("--headless", action="store_true",
                         help="No window; write rotating jpg + log over SSH")
     parser.add_argument("--snapshot-path", type=Path,
@@ -536,6 +563,56 @@ def main() -> int:
               f"freqs={args.fire_freq_x},{args.fire_freq_y}Hz "
               f"arm@conf={args.fire_arm_conf} dwell={args.fire_arm_dwell_s}s "
               f"override={args.fire_override}")
+
+    # ---- Pico link + calibration (closed-loop laser) -------------------
+    # This is what makes the physical laser actually point at the trail
+    # we draw on screen. The pipeline is:
+    #     laser_xy (pixel)  --calibration-->  (pan, tilt, rot)  -->  Pico
+    # Calibration was built with the camera in its CURRENT mount
+    # (including the rotate-180 flip and the camera-laser parallax),
+    # so the offset is baked into the anchors -- no separate offset
+    # parameter needed here.
+    pico_link = None
+    pico_cal = None
+    pico_min_dt = 1.0 / max(0.1, args.pico_rate_hz)
+    pico_last_send_at = 0.0
+    pico_last_mode_sent = None
+    if args.pico_port or args.pico_mock:
+        if not args.fire:
+            print("WARN: --pico-port/--pico-mock without --fire is a no-op; "
+                  "the laser only moves while the FIRE controller is engaged.")
+        if not args.cal.exists() and not args.pico_mock:
+            print(f"FAIL: calibration file not found at {args.cal}. "
+                  f"Build one first with scripts/calibration_remote.py")
+            cap.release()
+            return 1
+        from macbook.calibration import Calibration
+        from macbook.serial_link import open_link, PicoMode
+        pico_cal = Calibration.load(args.cal) if args.cal.exists() else Calibration()
+        # Stamp the calibration with the live frame size so the IDW
+        # interpolator's clamping uses the right bounds even if the
+        # file was saved against a different resolution.
+        pico_cal.frame_width = actual_w or pico_cal.frame_width
+        pico_cal.frame_height = actual_h or pico_cal.frame_height
+        pico_link = open_link(
+            mock=args.pico_mock,
+            port=args.pico_port or "/dev/ttyACM0",
+            verbose=args.pico_mock,
+        )
+        # Park the gimbal at the calibration center on startup so the
+        # laser sits at a known pose instead of wherever the servos
+        # last left it. Mode IDLE = no laser pulse, just slewing.
+        pico_link.aim(
+            pico_cal.pan_center,
+            pico_cal.tilt_center,
+            PicoMode.IDLE,
+            rotation=pico_cal.rotation_center,
+        )
+        pico_last_mode_sent = PicoMode.IDLE
+        print(f"Pico link {'(mock)' if args.pico_mock else 'OPEN'}: "
+              f"{len(pico_cal.anchors)} pan/tilt anchors, "
+              f"{len(pico_cal.rotation_anchors)} rotation anchors, "
+              f"max {args.pico_rate_hz:.0f} Hz, track-mode={args.pico_track_mode}")
     yolo_inst: YoloDetector | None = None
     if not args.no_yolo:
         if not args.weights.exists():
@@ -622,6 +699,11 @@ def main() -> int:
             if not ok:
                 print("Camera read failed; exiting.")
                 break
+            if args.rotate_180:
+                # Camera is physically mounted upside down. Flip ASAP so
+                # everything downstream (motion, YOLO, sweep, calibration,
+                # MJPEG, recording) sees an upright frame.
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
             frame_idx += 1
 
             motion_det = motion.detect(frame)
@@ -765,6 +847,55 @@ def main() -> int:
                 )
                 _draw_fire_status(frame, fire_decision)
 
+                # ---- Drive the physical laser (closed loop) ------------
+                # Pixel -> servo angles via the calibration map, then
+                # rate-limited send to the Pico. Three priorities:
+                #   1. ARMED + sweeping  -> aim at sweep point, mode=LOCKED
+                #   2. tracked but cold  -> aim at predictor lead, mode=TRACKING
+                #   3. no target at all  -> idle at calibration center
+                # The mode change itself is also sent on transitions
+                # (independent of the rate limiter) so the Pico's status
+                # LED reflects state changes immediately.
+                if pico_link is not None and pico_cal is not None:
+                    from macbook.serial_link import PicoMode
+                    aim_pixel: tuple[float, float] | None = None
+                    target_mode = PicoMode.IDLE
+                    if fire_decision.laser_on and laser_xy is not None:
+                        aim_pixel = laser_xy
+                        target_mode = PicoMode.LOCKED
+                    elif (
+                        args.pico_track_mode == "tracking"
+                        and tracked is not None
+                    ):
+                        aim_pixel = (
+                            float(tracked.aim_pixel[0]),
+                            float(tracked.aim_pixel[1]),
+                        )
+                        target_mode = PicoMode.TRACKING
+
+                    now_send = time.perf_counter()
+                    mode_changed = target_mode != pico_last_mode_sent
+                    rate_ok = (now_send - pico_last_send_at) >= pico_min_dt
+                    if aim_pixel is not None and (rate_ok or mode_changed):
+                        pan, tilt = pico_cal.pixel_to_servo(
+                            aim_pixel[0], aim_pixel[1]
+                        )
+                        rot = pico_cal.pixel_to_rotation(
+                            aim_pixel[0], aim_pixel[1]
+                        )
+                        pico_link.aim(pan, tilt, target_mode, rotation=rot)
+                        pico_last_send_at = now_send
+                        pico_last_mode_sent = target_mode
+                    elif aim_pixel is None and pico_last_mode_sent != PicoMode.IDLE:
+                        pico_link.aim(
+                            pico_cal.pan_center,
+                            pico_cal.tilt_center,
+                            PicoMode.IDLE,
+                            rotation=pico_cal.rotation_center,
+                        )
+                        pico_last_send_at = now_send
+                        pico_last_mode_sent = PicoMode.IDLE
+
             now = time.perf_counter()
             fps_window.append(now)
             fps = (
@@ -874,6 +1005,21 @@ def main() -> int:
             print(f"REC stop  -> {record_writer_path}")
             if streamer is not None:
                 streamer.set_recording_active(None)
+        if pico_link is not None:
+            try:
+                # Park at center + IDLE so the laser doesn't keep firing
+                # if we crash mid-engagement. Best-effort, not fatal.
+                if pico_cal is not None:
+                    from macbook.serial_link import PicoMode
+                    pico_link.aim(
+                        pico_cal.pan_center,
+                        pico_cal.tilt_center,
+                        PicoMode.IDLE,
+                        rotation=pico_cal.rotation_center,
+                    )
+                pico_link.close()
+            except Exception:
+                pass
         if not args.headless:
             cv2.destroyAllWindows()
 
