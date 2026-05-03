@@ -18,6 +18,8 @@
 
 Inline preview (5 s loop, generated from the bench-rig run):
 
+https://docs.google.com/presentation/d/1xIsRhnJ9cQvkaxQaKlofSN28-NLySRyl/edit?usp=sharing&ouid=108681221879058276924&rtpof=true&sd=true
+
 ![BlackFiber closed-loop drone neutralization demo](DroneKill.gif)
 
 > Closed-loop run on the bench rig: drone-trained YOLOv8 on a Jetson
