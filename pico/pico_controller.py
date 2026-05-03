@@ -3,8 +3,8 @@
 Runs on MicroPython. Upload as `main.py` to auto-start on boot.
 
 Pin map (see pico/README.md for wiring + power notes):
-    GP0   pan servo PWM       (50 Hz, hobby servo)
-    GP1   tilt servo PWM      (50 Hz, hobby servo)
+    GP0   tilt servo PWM      (50 Hz, hobby servo)  -- swapped from
+    GP1   pan servo PWM       (50 Hz, hobby servo)     the original wiring
     GP2   HC-SR04 trigger     (output)
     GP3   HC-SR04 echo        (input, voltage-divided to 3.3V)
     GP4   PIR / Fresnel       (input, internal pull-down so an
@@ -54,8 +54,8 @@ import time
 
 from machine import ADC, PWM, Pin
 
-PAN_PIN = 0
-TILT_PIN = 1
+PAN_PIN = 1
+TILT_PIN = 0
 TRIG_PIN = 2
 ECHO_PIN = 3
 PIR_PIN = 4

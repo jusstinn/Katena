@@ -373,11 +373,96 @@ class RemoteCalibrationApp:
         cv2.setMouseCallback(self.window, self._on_mouse)
         self._connected_pixel_size_seen = False
 
+        # ---- TRACK-cursor state ---------------------------------------
+        # When TRACK is on, the laser is continuously commanded to
+        # wherever the mouse cursor sits. Use this to verify the
+        # calibration in real time: drag the cursor across the live
+        # feed and watch whether the dot follows.
+        self._track = False
+        self._last_track_xy: tuple[int, int] = (-1, -1)
+        self._last_track_send_at = 0.0
+        self._track_min_dt = 1.0 / 30.0  # 30 Hz max command rate
+        # Cached leave-one-out residuals: anchor index -> (delta_pan,
+        # delta_tilt, total_deg). Recomputed when anchors change.
+        self._loo: dict[int, tuple[float, float, float]] = {}
+        self._loo_dirty = True
+
     def _flash(self, msg: str) -> None:
         self.message = (msg, time.time() + 2.5)
 
     def _command_servos(self, mode: PicoMode = PicoMode.IDLE) -> None:
         self.link.aim(self.pan, self.tilt, mode, rotation=self.rotation)
+
+    def _recompute_loo(self) -> None:
+        """Leave-one-out residual for every pan/tilt anchor.
+
+        For each anchor i, build a calibration that excludes it, then
+        ask that calibration where the laser SHOULD aim to hit anchor
+        i's pixel. Compare against anchor i's actual servo angles.
+        High residuals = inconsistent anchor (likely a misclick or a
+        spot the IDW interpolator can't agree on with its neighbours).
+
+        We display the residual on the anchor's label so the operator
+        can spot bad anchors at a glance and remove them with `z`.
+        """
+        self._loo = {}
+        anchors = self.cal.anchors
+        if len(anchors) < 3:
+            self._loo_dirty = False
+            return
+        for i, a in enumerate(anchors):
+            sub = Calibration(
+                anchors=[other for j, other in enumerate(anchors) if j != i],
+                rotation_anchors=list(self.cal.rotation_anchors),
+                frame_width=self.cal.frame_width,
+                frame_height=self.cal.frame_height,
+                pan_min=self.cal.pan_min, pan_max=self.cal.pan_max,
+                tilt_min=self.cal.tilt_min, tilt_max=self.cal.tilt_max,
+                pan_center=self.cal.pan_center, tilt_center=self.cal.tilt_center,
+                rotation_min=self.cal.rotation_min, rotation_max=self.cal.rotation_max,
+                rotation_center=self.cal.rotation_center,
+            )
+            try:
+                pred_pan, pred_tilt = sub.pixel_to_servo(a.pixel_x, a.pixel_y)
+            except Exception:
+                continue
+            dp, dt = a.pan_angle - pred_pan, a.tilt_angle - pred_tilt
+            self._loo[i] = (dp, dt, (dp * dp + dt * dt) ** 0.5)
+        self._loo_dirty = False
+
+    def _toggle_track(self) -> None:
+        self._track = not self._track
+        if self._track:
+            if len(self.cal.anchors) < 2:
+                self._track = False
+                self._flash("Need >= 2 anchors before TRACK can aim")
+                return
+            self._flash("TRACK ON  -- laser follows cursor (t to stop)")
+        else:
+            self._flash("TRACK OFF")
+            # Snap back to center when leaving track so the gimbal
+            # parks at a known pose instead of wherever the cursor
+            # last was.
+            self.pan = self.cal.pan_center
+            self.tilt = self.cal.tilt_center
+            self.rotation = self.cal.rotation_center
+            self._command_servos(PicoMode.IDLE)
+
+    def _maybe_track(self) -> None:
+        if not self._track or len(self.cal.anchors) < 2:
+            return
+        mx, my = self.mouse_xy
+        now = time.perf_counter()
+        if (mx, my) == self._last_track_xy and (now - self._last_track_send_at) < 0.25:
+            return
+        if (now - self._last_track_send_at) < self._track_min_dt:
+            return
+        pan, tilt = self.cal.pixel_to_servo(float(mx), float(my))
+        rotation = self.cal.pixel_to_rotation(float(mx), float(my))
+        self.pan, self.tilt, self.rotation = pan, tilt, rotation
+        self._command_servos(PicoMode.TRACKING)
+        self._last_track_xy = (mx, my)
+        self._last_track_send_at = now
 
     def _on_mouse(self, event: int, x: int, y: int, flags: int, _param) -> None:
         self.mouse_xy = (x, y)
@@ -396,6 +481,7 @@ class RemoteCalibrationApp:
                 self.cal.add(
                     CalibrationAnchor(float(x), float(y), self.pan, self.tilt)
                 )
+                self._loo_dirty = True
                 self._flash(
                     f"+ anchor ({x},{y}) -> pan={self.pan:.1f} tilt={self.tilt:.1f}"
                 )
@@ -439,8 +525,14 @@ class RemoteCalibrationApp:
             rotation = self.cal.rotation_center
             self._flash("Reset to center")
         elif key == ord("m"):
+            # Toggle JOG/TEST. Always exit TRACK first so we don't have
+            # the laser auto-aiming while the operator is in JOG mode.
+            if self._track:
+                self._toggle_track()
             self.mode = "TEST" if self.mode == "JOG" else "JOG"
             self._flash(f"Mode: {self.mode}")
+        elif key == ord("t"):
+            self._toggle_track()
         elif key == ord("h"):
             self.show_help = not self.show_help
         elif key == ord("f"):
@@ -451,12 +543,14 @@ class RemoteCalibrationApp:
             )
         elif key == ord("g"):
             self.cal = Calibration.load(self.cal_path)
+            self._loo_dirty = True
             self._flash(
                 f"Loaded {len(self.cal.anchors)}+{len(self.cal.rotation_anchors)}rot "
                 f"anchors"
             )
         elif key == ord("c"):
             self.cal.anchors.clear()
+            self._loo_dirty = True
             self._flash("Cleared all pan/tilt anchors")
         elif key == ord("C"):
             self.cal.rotation_anchors.clear()
@@ -464,6 +558,8 @@ class RemoteCalibrationApp:
         elif key == ord("z"):
             mx, my = self.mouse_xy
             removed = self.cal.remove_nearest(float(mx), float(my))
+            if removed:
+                self._loo_dirty = True
             self._flash(
                 "Removed nearest pan/tilt anchor"
                 if removed else "No anchor near cursor"
@@ -491,14 +587,35 @@ class RemoteCalibrationApp:
         return True
 
     def _draw_overlays(self, frame: np.ndarray) -> None:
+        if self._loo_dirty:
+            self._recompute_loo()
+
         for i, a in enumerate(self.cal.anchors):
+            # Color-code by leave-one-out residual:
+            #   GREEN  < 2 deg  (anchor agrees with neighbours)
+            #   AMBER  2-5 deg  (mild disagreement, still usable)
+            #   RED    > 5 deg  (probably misclicked / inconsistent)
+            #   CYAN   no LOO yet (need >= 3 anchors)
+            err = self._loo.get(i)
+            if err is None:
+                color = (220, 220, 0)  # cyan-ish: not yet evaluated
+                label_extra = ""
+            else:
+                _dp, _dt, mag = err
+                if mag < 2.0:
+                    color = (0, 220, 0)
+                elif mag < 5.0:
+                    color = (0, 200, 240)
+                else:
+                    color = (0, 0, 230)
+                label_extra = f" e={mag:.1f}d"
             cv2.circle(frame, (int(a.pixel_x), int(a.pixel_y)), 8,
-                       (0, 200, 255), 2, cv2.LINE_AA)
+                       color, 2, cv2.LINE_AA)
             cv2.circle(frame, (int(a.pixel_x), int(a.pixel_y)), 2,
-                       (0, 200, 255), -1, cv2.LINE_AA)
+                       color, -1, cv2.LINE_AA)
             _shadowed_text(
                 frame,
-                f"{i + 1} ({a.pan_angle:.0f},{a.tilt_angle:.0f})",
+                f"{i + 1} ({a.pan_angle:.0f},{a.tilt_angle:.0f}){label_extra}",
                 (int(a.pixel_x) + 12, int(a.pixel_y) - 8),
                 scale=0.4,
                 thickness=1,
@@ -515,18 +632,25 @@ class RemoteCalibrationApp:
                 thickness=1,
             )
 
-        if self.mode == "TEST" and len(self.cal.anchors) >= 2:
+        # Predicted-aim crosshair: TEST mode shows it on hover; TRACK
+        # mode renders a bigger one so the operator can see the laser
+        # target prominently while the dot follows in the live feed.
+        if (self.mode == "TEST" or self._track) and len(self.cal.anchors) >= 2:
             mx, my = self.mouse_xy
             pred_pan, pred_tilt = self.cal.pixel_to_servo(float(mx), float(my))
             pred_rot = self.cal.pixel_to_rotation(float(mx), float(my))
+            marker_color = (0, 230, 120) if self._track else (0, 0, 255)
+            marker_size = 28 if self._track else 18
+            cv2.drawMarker(frame, (mx, my), marker_color,
+                           cv2.MARKER_CROSS, marker_size, 2)
+            cv2.circle(frame, (mx, my), 14, marker_color, 1, cv2.LINE_AA)
             _shadowed_text(
                 frame,
-                f"would aim: pan={pred_pan:.1f} tilt={pred_tilt:.1f} rot={pred_rot:+.1f}",
-                (mx + 12, my + 16),
+                f"aim: pan={pred_pan:.1f} tilt={pred_tilt:.1f} rot={pred_rot:+.1f}",
+                (mx + 16, my + 18),
                 scale=0.45,
                 thickness=1,
             )
-            cv2.drawMarker(frame, (mx, my), (0, 0, 255), cv2.MARKER_CROSS, 18, 1)
 
         draw_crosshair(frame)
 
@@ -534,11 +658,26 @@ class RemoteCalibrationApp:
         bridge_state = "CONNECTED" if self.link.is_connected() else "OFFLINE"
         src_err = self.source.last_error()
         feed_state = "OFFLINE: " + src_err if src_err else "LIVE"
+        # Aggregate LOO summary: how many anchors are in each tier.
+        loo_counts = [0, 0, 0]  # green, amber, red
+        for _i, (_dp, _dt, mag) in self._loo.items():
+            if mag < 2.0:
+                loo_counts[0] += 1
+            elif mag < 5.0:
+                loo_counts[1] += 1
+            else:
+                loo_counts[2] += 1
+        loo_str = (
+            f"FIT: {loo_counts[0]}g / {loo_counts[1]}a / {loo_counts[2]}r"
+            if self._loo else "FIT: -- (need >=3 anchors)"
+        )
+        mode_disp = "TRACK" if self._track else self.mode
         bar_lines = [
-            f"MODE: {self.mode}   PAN: {self.pan:6.1f}   TILT: {self.tilt:6.1f}   "
+            f"MODE: {mode_disp}   PAN: {self.pan:6.1f}   TILT: {self.tilt:6.1f}   "
             f"ROT: {self.rotation:+6.1f}",
             f"ANCHORS: {len(self.cal.anchors)} pan/tilt + "
             f"{len(self.cal.rotation_anchors)} rot   "
+            f"{loo_str}   "
             f"PICO: {bridge_state}   FEED: {feed_state}   "
             f"FILE: {self.cal_path.name}",
         ]
@@ -548,20 +687,23 @@ class RemoteCalibrationApp:
             y += 18
 
         if self.show_help:
+            if self._track:
+                second_line = "TRACK ON: laser follows cursor live (t to stop)"
+            elif self.mode == "JOG":
+                second_line = "LEFT-CLICK: add pan/tilt anchor    SHIFT+CLICK: add rotation anchor"
+            else:
+                second_line = "LEFT-CLICK: AIM at clicked pixel via calibration"
             help_lines = [
                 "WASD: nudge pan/tilt 1deg     J/L: nudge stepper 2deg    (capslock = 5x)",
-                "LEFT-CLICK: " + (
-                    "add pan/tilt anchor    SHIFT+CLICK: add rotation anchor"
-                    if self.mode == "JOG"
-                    else "AIM at clicked pixel via calibration"
-                ),
-                "M: switch JOG/TEST    1-9: presets    R: reset to center",
+                second_line,
+                "M: switch JOG/TEST    T: live TRACK cursor    R: reset to center    1-9: presets",
                 "Z / shift-Z: remove nearest pan-tilt / rotation anchor    C / shift-C: clear all",
                 "F: save    G: load    H: toggle help    Q/Esc: quit",
+                "Anchor color = leave-one-out residual: green<2deg  amber<5deg  red>5deg",
             ]
             box_h = 22 * len(help_lines) + 12
             overlay = frame.copy()
-            cv2.rectangle(overlay, (10, 70), (640, 70 + box_h), (0, 0, 0), -1)
+            cv2.rectangle(overlay, (10, 70), (700, 70 + box_h), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
             for i, line in enumerate(help_lines):
                 _shadowed_text(frame, line, (20, 92 + i * 22), scale=0.5, thickness=1)
@@ -603,6 +745,7 @@ class RemoteCalibrationApp:
                         self.cal.frame_height = h
                         self.mouse_xy = (w // 2, h // 2)
                         self._connected_pixel_size_seen = True
+                self._maybe_track()
                 self._draw_overlays(frame)
                 cv2.imshow(self.window, frame)
                 key = cv2.waitKey(15) & 0xFF

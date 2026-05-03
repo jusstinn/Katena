@@ -302,6 +302,162 @@ def _detect_yolo(
     return det, name
 
 
+class GimbalDriver:
+    """Background thread that smoothly drives the Pico toward a target.
+
+    Why this exists:
+      * The detection loop runs at the camera's frame rate, which can be
+        as low as 6 fps when YOLO is on. If we step the servos once per
+        detection, the user sees 167 ms gaps between commands -- chunky,
+        bursty motion. Decoupling the actuator into its own ~100 Hz
+        thread fixes that.
+      * Velocity-limit-only is "bang-bang" -- the gimbal jumps from
+        stationary to max velocity in one tick, which is jiggly. We use
+        a proper trapezoidal motion profile: accelerate up to v_max,
+        cruise, decelerate to land on the target with zero velocity.
+        That's where the smoothness comes from.
+
+    Producer-consumer split: the detection loop calls `set_target()`
+    whenever it has a new desired aim. The driver thread reads the
+    latest target each tick, runs the motion profile, and writes
+    rate-limited commands to the Pico.
+    """
+
+    import threading as _threading  # local to keep top-level imports lean
+
+    def __init__(
+        self,
+        link,
+        cal,
+        *,
+        rate_hz: float = 100.0,
+        send_rate_hz: float = 30.0,
+        max_vel_deg_s: float = 90.0,
+        max_accel_deg_s2: float = 360.0,
+        max_rot_vel_deg_s: float = 120.0,
+        max_rot_accel_deg_s2: float = 480.0,
+    ) -> None:
+        from macbook.serial_link import PicoMode  # local import
+        self._PicoMode = PicoMode
+
+        self.link = link
+        self.cal = cal
+        self.dt = 1.0 / max(1.0, rate_hz)
+        self.send_min_dt = 1.0 / max(1.0, send_rate_hz)
+        self.max_vel = max_vel_deg_s
+        self.max_accel = max_accel_deg_s2
+        self.max_rot_vel = max_rot_vel_deg_s
+        self.max_rot_accel = max_rot_accel_deg_s2
+
+        # Driver-thread owned state.
+        self.pan_actual = float(cal.pan_center)
+        self.tilt_actual = float(cal.tilt_center)
+        self.rot_actual = float(cal.rotation_center)
+        self.pan_vel = 0.0
+        self.tilt_vel = 0.0
+        self.rot_vel = 0.0
+        self._last_send_at = 0.0
+        self._last_mode_sent = None
+
+        # Producer-set target slot, guarded by a tiny lock.
+        self._lock = self._threading.Lock()
+        self._pan_target = self.pan_actual
+        self._tilt_target = self.tilt_actual
+        self._rot_target = self.rot_actual
+        self._mode_target = PicoMode.IDLE
+
+        self._stop = self._threading.Event()
+        self._thread = self._threading.Thread(
+            target=self._run, name="gimbal-driver", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+    def set_target(self, pan: float, tilt: float, rot: float, mode) -> None:
+        with self._lock:
+            self._pan_target = float(pan)
+            self._tilt_target = float(tilt)
+            self._rot_target = float(rot)
+            self._mode_target = mode
+
+    @staticmethod
+    def _step_axis(actual: float, vel: float, target: float,
+                   v_max: float, a_max: float, dt: float) -> tuple[float, float]:
+        """One trapezoidal motion-profile step on a single axis.
+
+        Returns (new_actual, new_vel). The trick is computing the
+        "decel-to-stop" velocity envelope: max_v we can have right now
+        and still brake to 0 by the time we reach the target. Plugging
+        v^2 = 2*a*d gives v_envelope = sqrt(2*a*|e|), capped at v_max.
+        """
+        error = target - actual
+        if error == 0.0 and vel == 0.0:
+            return actual, 0.0
+        sign = 1.0 if error > 0 else (-1.0 if error < 0 else 0.0)
+        v_envelope = sign * min(v_max, (2.0 * a_max * abs(error)) ** 0.5)
+        # Accel-limit toward the envelope velocity.
+        dv_max = a_max * dt
+        dv = max(-dv_max, min(dv_max, v_envelope - vel))
+        new_vel = max(-v_max, min(v_max, vel + dv))
+        new_actual = actual + new_vel * dt
+        # Snap if we'd overshoot the target this step.
+        if (sign > 0 and new_actual >= target) or (sign < 0 and new_actual <= target):
+            new_actual = target
+            new_vel = 0.0
+        return new_actual, new_vel
+
+    def _run(self) -> None:
+        next_tick = time.perf_counter()
+        while not self._stop.is_set():
+            with self._lock:
+                pan_t = self._pan_target
+                tilt_t = self._tilt_target
+                rot_t = self._rot_target
+                mode_t = self._mode_target
+
+            self.pan_actual, self.pan_vel = self._step_axis(
+                self.pan_actual, self.pan_vel, pan_t,
+                self.max_vel, self.max_accel, self.dt,
+            )
+            self.tilt_actual, self.tilt_vel = self._step_axis(
+                self.tilt_actual, self.tilt_vel, tilt_t,
+                self.max_vel, self.max_accel, self.dt,
+            )
+            self.rot_actual, self.rot_vel = self._step_axis(
+                self.rot_actual, self.rot_vel, rot_t,
+                self.max_rot_vel, self.max_rot_accel, self.dt,
+            )
+
+            now = time.perf_counter()
+            mode_changed = mode_t != self._last_mode_sent
+            if (now - self._last_send_at) >= self.send_min_dt or mode_changed:
+                try:
+                    self.link.aim(
+                        self.pan_actual, self.tilt_actual, mode_t,
+                        rotation=self.rot_actual,
+                    )
+                except Exception:
+                    # Don't let a transient serial hiccup take down the
+                    # driver thread; just skip this tick.
+                    pass
+                self._last_send_at = now
+                self._last_mode_sent = mode_t
+
+            next_tick += self.dt
+            sleep_for = next_tick - time.perf_counter()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            elif sleep_for < -0.05:
+                # We fell way behind (host very busy). Reset the schedule
+                # instead of trying to catch up with a burst of writes.
+                next_tick = time.perf_counter()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -445,6 +601,36 @@ def main() -> int:
                              "state isn't armed. 'tracking' slow-follows the predicted "
                              "aim point so the gimbal stays roughly on target. 'off' "
                              "only commands the Pico when armed (laser_on=True).")
+    parser.add_argument("--pico-max-slew-deg-s", type=float, default=90.0,
+                        help="Max angular velocity (deg/s) for the host-side servo "
+                             "interpolator. The motion profile is trapezoidal: "
+                             "accelerate up to this velocity, cruise, then decelerate "
+                             "to land on the target without overshoot. Lower = "
+                             "smoother and less cable-whipping. Default 90 deg/s.")
+    parser.add_argument("--pico-max-accel-deg-s2", type=float, default=360.0,
+                        help="Max angular acceleration (deg/s^2) for the host-side "
+                             "interpolator. This is what removes the 'jiggle' -- "
+                             "instead of jumping straight to max velocity, the "
+                             "gimbal ramps up smoothly. Default 360 deg/s^2 takes "
+                             "0.25 s to reach 90 deg/s from a stop.")
+    parser.add_argument("--pico-max-rot-slew-deg-s", type=float, default=120.0,
+                        help="Same velocity cap for the base-rotation stepper "
+                             "(default 120 deg/s, matches the 28BYJ-48's mechanical "
+                             "limit).")
+    parser.add_argument("--pico-max-rot-accel-deg-s2", type=float, default=480.0,
+                        help="Max angular accel for the rotation stepper. Steppers "
+                             "tolerate higher accel than servos before stalling.")
+    parser.add_argument("--pico-driver-rate-hz", type=float, default=100.0,
+                        help="How fast the background actuator thread ticks (default "
+                             "100 Hz). This is independent of the detection frame "
+                             "rate -- so even if YOLO runs at 6 fps the gimbal still "
+                             "interpolates at 100 Hz between detections, giving "
+                             "smooth continuous motion.")
+    parser.add_argument("--engage-on-start", action="store_true",
+                        help="Skip the browser ENGAGE LASER button and start with "
+                             "the laser engaged. Default OFF -- on startup the "
+                             "gimbal is parked at calibration center and won't move "
+                             "until you click ENGAGE LASER on http://localhost:8765/")
     parser.add_argument("--headless", action="store_true",
                         help="No window; write rotating jpg + log over SSH")
     parser.add_argument("--snapshot-path", type=Path,
@@ -574,9 +760,7 @@ def main() -> int:
     # parameter needed here.
     pico_link = None
     pico_cal = None
-    pico_min_dt = 1.0 / max(0.1, args.pico_rate_hz)
-    pico_last_send_at = 0.0
-    pico_last_mode_sent = None
+    pico_driver: GimbalDriver | None = None
     if args.pico_port or args.pico_mock:
         if not args.fire:
             print("WARN: --pico-port/--pico-mock without --fire is a no-op; "
@@ -599,20 +783,34 @@ def main() -> int:
             port=args.pico_port or "/dev/ttyACM0",
             verbose=args.pico_mock,
         )
-        # Park the gimbal at the calibration center on startup so the
-        # laser sits at a known pose instead of wherever the servos
-        # last left it. Mode IDLE = no laser pulse, just slewing.
+        # Park the gimbal at calibration center on startup, then hand
+        # control over to the GimbalDriver (background thread). The
+        # driver owns ALL Pico writes from this point on -- the main
+        # detection loop only sets target via driver.set_target().
         pico_link.aim(
             pico_cal.pan_center,
             pico_cal.tilt_center,
             PicoMode.IDLE,
             rotation=pico_cal.rotation_center,
         )
-        pico_last_mode_sent = PicoMode.IDLE
+        pico_driver = GimbalDriver(
+            pico_link, pico_cal,
+            rate_hz=args.pico_driver_rate_hz,
+            send_rate_hz=args.pico_rate_hz,
+            max_vel_deg_s=args.pico_max_slew_deg_s,
+            max_accel_deg_s2=args.pico_max_accel_deg_s2,
+            max_rot_vel_deg_s=args.pico_max_rot_slew_deg_s,
+            max_rot_accel_deg_s2=args.pico_max_rot_accel_deg_s2,
+        )
+        pico_driver.start()
         print(f"Pico link {'(mock)' if args.pico_mock else 'OPEN'}: "
               f"{len(pico_cal.anchors)} pan/tilt anchors, "
-              f"{len(pico_cal.rotation_anchors)} rotation anchors, "
-              f"max {args.pico_rate_hz:.0f} Hz, track-mode={args.pico_track_mode}")
+              f"{len(pico_cal.rotation_anchors)} rotation anchors")
+        print(f"GimbalDriver: drive@{args.pico_driver_rate_hz:.0f}Hz "
+              f"send@{args.pico_rate_hz:.0f}Hz "
+              f"v_max={args.pico_max_slew_deg_s:.0f}deg/s "
+              f"a_max={args.pico_max_accel_deg_s2:.0f}deg/s^2 "
+              f"track={args.pico_track_mode}")
     yolo_inst: YoloDetector | None = None
     if not args.no_yolo:
         if not args.weights.exists():
@@ -638,8 +836,11 @@ def main() -> int:
             max_fps=args.mjpeg_max_fps,
         )
         streamer.start()
+        if args.engage_on_start:
+            streamer.set_laser_engaged(True)
+        engage_note = " ENGAGED" if args.engage_on_start else " (parked; click ENGAGE LASER on the page)"
         print(f"MJPEG stream:  http://<jetson-ip>:{args.mjpeg_port}/  "
-              f"(quality={args.mjpeg_quality} max_fps={args.mjpeg_max_fps})")
+              f"(quality={args.mjpeg_quality} max_fps={args.mjpeg_max_fps}){engage_note}")
 
     if args.headless:
         args.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -799,7 +1000,14 @@ def main() -> int:
                 fire_decision = fire_ctl.update(conf_for_fire, args.fire_override)
                 zone = None
                 laser_xy = None
-                if fused_for_aim is not None and fire_decision.laser_on:
+                # Compute the figure-8 sweep point whenever we have a
+                # target -- not just when FIRE arms. This is what makes
+                # the gimbal trace the lissajous in TRACKING mode too,
+                # so the laser is always painting the trail when locked
+                # onto something. Visually we still gate the *trail
+                # rendering* on fire_decision.laser_on (see below) so
+                # the screen overlay reads as "tracking vs firing".
+                if fused_for_aim is not None:
                     velocity = (
                         tracked.velocity if tracked is not None else (0.0, 0.0)
                     )
@@ -848,23 +1056,36 @@ def main() -> int:
                 _draw_fire_status(frame, fire_decision)
 
                 # ---- Drive the physical laser (closed loop) ------------
-                # Pixel -> servo angles via the calibration map, then
-                # rate-limited send to the Pico. Three priorities:
-                #   1. ARMED + sweeping  -> aim at sweep point, mode=LOCKED
-                #   2. tracked but cold  -> aim at predictor lead, mode=TRACKING
-                #   3. no target at all  -> idle at calibration center
-                # The mode change itself is also sent on transitions
-                # (independent of the rate limiter) so the Pico's status
-                # LED reflects state changes immediately.
-                if pico_link is not None and pico_cal is not None:
+                # We only PUBLISH the desired target here. The actual
+                # smooth interpolation + Pico writes happen in the
+                # GimbalDriver background thread, which ticks at 100 Hz
+                # regardless of how slow this detection loop is. That's
+                # what gives continuous, never-bursty motion.
+                #
+                # Target priority (now that the figure-8 sweep point
+                # `laser_xy` is computed any time we have a target):
+                #   1. ENGAGED + laser_xy  -> figure-8 sweep point
+                #        mode = LOCKED if FIRE armed else TRACKING
+                #   2. ENGAGED + tracked   -> predictor lead (fallback)
+                #   3. else                -> park at calibration center
+                if pico_driver is not None and pico_cal is not None:
                     from macbook.serial_link import PicoMode
+                    engaged = (
+                        streamer.laser_engaged if streamer is not None
+                        else True
+                    )
                     aim_pixel: tuple[float, float] | None = None
                     target_mode = PicoMode.IDLE
-                    if fire_decision.laser_on and laser_xy is not None:
+                    if engaged and laser_xy is not None:
                         aim_pixel = laser_xy
-                        target_mode = PicoMode.LOCKED
+                        target_mode = (
+                            PicoMode.LOCKED
+                            if fire_decision.laser_on
+                            else PicoMode.TRACKING
+                        )
                     elif (
-                        args.pico_track_mode == "tracking"
+                        engaged
+                        and args.pico_track_mode == "tracking"
                         and tracked is not None
                     ):
                         aim_pixel = (
@@ -873,28 +1094,19 @@ def main() -> int:
                         )
                         target_mode = PicoMode.TRACKING
 
-                    now_send = time.perf_counter()
-                    mode_changed = target_mode != pico_last_mode_sent
-                    rate_ok = (now_send - pico_last_send_at) >= pico_min_dt
-                    if aim_pixel is not None and (rate_ok or mode_changed):
-                        pan, tilt = pico_cal.pixel_to_servo(
+                    if aim_pixel is not None:
+                        pan_tgt, tilt_tgt = pico_cal.pixel_to_servo(
                             aim_pixel[0], aim_pixel[1]
                         )
-                        rot = pico_cal.pixel_to_rotation(
+                        rot_tgt = pico_cal.pixel_to_rotation(
                             aim_pixel[0], aim_pixel[1]
                         )
-                        pico_link.aim(pan, tilt, target_mode, rotation=rot)
-                        pico_last_send_at = now_send
-                        pico_last_mode_sent = target_mode
-                    elif aim_pixel is None and pico_last_mode_sent != PicoMode.IDLE:
-                        pico_link.aim(
-                            pico_cal.pan_center,
-                            pico_cal.tilt_center,
-                            PicoMode.IDLE,
-                            rotation=pico_cal.rotation_center,
-                        )
-                        pico_last_send_at = now_send
-                        pico_last_mode_sent = PicoMode.IDLE
+                    else:
+                        pan_tgt = pico_cal.pan_center
+                        tilt_tgt = pico_cal.tilt_center
+                        rot_tgt = pico_cal.rotation_center
+
+                    pico_driver.set_target(pan_tgt, tilt_tgt, rot_tgt, target_mode)
 
             now = time.perf_counter()
             fps_window.append(now)
@@ -1005,6 +1217,11 @@ def main() -> int:
             print(f"REC stop  -> {record_writer_path}")
             if streamer is not None:
                 streamer.set_recording_active(None)
+        if pico_driver is not None:
+            try:
+                pico_driver.stop()
+            except Exception:
+                pass
         if pico_link is not None:
             try:
                 # Park at center + IDLE so the laser doesn't keep firing

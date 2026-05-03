@@ -57,11 +57,17 @@ _INDEX_HTML = """<!doctype html>
   button:hover { background:#374151; }
   button.rec   { background:#7f1d1d; border-color:#b91c1c; }
   button.rec:hover { background:#991b1b; }
-  #status { color:#6b7280; font-size:12px; }
+  button.eng   { background:#14532d; border-color:#16a34a; }
+  button.eng:hover { background:#166534; }
+  #status, #lstatus { color:#6b7280; font-size:12px; }
   #status.on { color:#fca5a5; }
+  #lstatus.on { color:#86efac; }
 </style></head>
 <body>
   <h1>KATENA LIVE  /stream.mjpg
+    <button id="engBtn" onclick="toggleEng()">ENGAGE LASER</button>
+    <span id="lstatus">parked</span>
+    <span style="opacity:0.4">|</span>
     <button id="recBtn" onclick="toggleRec()">REC</button>
     <span id="status">idle</span>
   </h1>
@@ -76,11 +82,21 @@ _INDEX_HTML = """<!doctype html>
     else             { btn.classList.remove('rec'); btn.textContent='REC';
                        sts.classList.remove('on'); sts.textContent =
                          j.last_path ? 'last: '+j.last_path : 'idle'; }
+    const lr = await fetch('/laser/status'); const lj = await lr.json();
+    const lbtn = document.getElementById('engBtn');
+    const lsts = document.getElementById('lstatus');
+    if (lj.engaged) { lbtn.classList.add('eng'); lbtn.textContent='DISENGAGE';
+                      lsts.classList.add('on'); lsts.textContent = 'tracking live'; }
+    else            { lbtn.classList.remove('eng'); lbtn.textContent='ENGAGE LASER';
+                      lsts.classList.remove('on'); lsts.textContent = 'parked'; }
   }
   async function toggleRec(){
     await fetch('/record/toggle', {method:'POST'}); refresh();
   }
-  refresh(); setInterval(refresh, 1500);
+  async function toggleEng(){
+    await fetch('/laser/toggle', {method:'POST'}); refresh();
+  }
+  refresh(); setInterval(refresh, 800);
 </script>
 </body></html>
 """
@@ -121,6 +137,14 @@ class MJPEGServer:
         self._record_requested = False
         self._record_active_path: Optional[str] = None  # set by producer
         self._record_last_path: Optional[str] = None    # set by producer at stop
+
+        # --- laser-engage state (browser-driven). Producer polls
+        # `laser_engaged` each frame to decide whether to actually
+        # actuate the gimbal. Defaults to FALSE so the laser never
+        # starts moving on its own at process launch -- the operator
+        # has to click ENGAGE LASER on the browser page first.
+        self._laser_lock = threading.Lock()
+        self._laser_engaged = False
 
     # ----- producer side -----
 
@@ -173,6 +197,32 @@ class MJPEGServer:
                 "path": self._record_active_path,
                 "last_path": self._record_last_path,
             }
+
+    # ----- laser-engage control (thread-safe) -----
+
+    @property
+    def laser_engaged(self) -> bool:
+        """Producer polls this each frame. While False the producer
+        should keep the gimbal parked at calibration center and skip
+        all FIRE actuation -- still rendering the overlays so the
+        operator can see what WOULD happen, just not moving servos."""
+        with self._laser_lock:
+            return self._laser_engaged
+
+    def set_laser_engaged(self, engaged: bool) -> None:
+        """Force the engage state from code (e.g. CLI --engage-on-start
+        or a safety auto-disengage). Browser button uses _toggle_laser."""
+        with self._laser_lock:
+            self._laser_engaged = bool(engaged)
+
+    def _toggle_laser(self) -> dict:
+        with self._laser_lock:
+            self._laser_engaged = not self._laser_engaged
+            return {"engaged": self._laser_engaged}
+
+    def _laser_status(self) -> dict:
+        with self._laser_lock:
+            return {"engaged": self._laser_engaged}
 
     # ----- server lifecycle -----
 
@@ -252,6 +302,8 @@ class MJPEGServer:
                     self._serve_stream()
                 elif self.path == "/record/status":
                     self._serve_json(srv._record_status())
+                elif self.path == "/laser/status":
+                    self._serve_json(srv._laser_status())
                 else:
                     self.send_response(404)
                     self.send_header("Content-Length", "0")
@@ -260,6 +312,8 @@ class MJPEGServer:
             def do_POST(self) -> None:  # noqa: N802
                 if self.path == "/record/toggle":
                     self._serve_json(srv._toggle_record())
+                elif self.path == "/laser/toggle":
+                    self._serve_json(srv._toggle_laser())
                 else:
                     self.send_response(404)
                     self.send_header("Content-Length", "0")
