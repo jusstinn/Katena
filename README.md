@@ -31,6 +31,32 @@ Inline preview (5 s loop, generated from the bench-rig run):
 
 ---
 
+## The hardware
+
+![BlackFiber bench-rig hardware](hardware.jpg)
+
+> The full physical stack: USB camera on a 2-axis pan/tilt mount above
+> a 28BYJ-48 base-rotation stepper, laser module rigidly co-located
+> with the camera, all driven by a Raspberry Pi Pico W on the side.
+> The Jetson CASK lives off-frame at the end of the USB cable. Total
+> kit fits in a backpack — that's the PS2 "austere edge" picture.
+
+## Optical-injection proof
+
+![Laser-induced bit errors on the fiber tether](optical_injection_proof.gif)
+
+> Bench-top proof that the cladding-breach mechanism is real and not
+> theatre: BlackFiber's laser is held against a live POF tether; on
+> the receive side, the photodetector and signal monitor degrade
+> from clean carrier to total loss of total internal reflection.
+> No fiber severing — just cladding scratch.
+>
+> Full clip (4.7 MB, 25 s, audio narration):
+> [optical_injection_proof.mp4](optical_injection_proof.mp4)
+> · click **View raw** to download.
+
+---
+
 ## The thesis
 
 **RF silence is a positive identifier of a FOG drone.** They're immune
