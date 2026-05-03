@@ -160,7 +160,7 @@ class MJPEGSource:
                 backoff = min(backoff * 2, 5.0)
 
     def _stream_once(self) -> None:
-        req = urllib.request.Request(self.url, headers={"User-Agent": "katena-calibration"})
+        req = urllib.request.Request(self.url, headers={"User-Agent": "blackfiber-calibration"})
         with urllib.request.urlopen(req, timeout=self.connect_timeout) as resp:
             self._err = None
             buf = b""
@@ -368,7 +368,7 @@ class RemoteCalibrationApp:
             self.cal.frame_height // 2,
         )
         self.message: tuple[str, float] = ("", 0.0)
-        self.window = "Katena Remote Calibration  (h help, q quit)"
+        self.window = "BlackFiber Remote Calibration  (h help, q quit)"
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window, self._on_mouse)
         self._connected_pixel_size_seen = False

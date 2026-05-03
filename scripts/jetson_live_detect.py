@@ -855,7 +855,7 @@ def main() -> int:
         if not streamer:
             print(f"Headless mode: writing latest frame to {args.snapshot_path}")
     else:
-        cv2.namedWindow("Katena Live  (q quit, s snap, h help)", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("BlackFiber Live  (q quit, s snap, h help)", cv2.WINDOW_NORMAL)
 
     fps_window: deque[float] = deque(maxlen=30)
     fps_window.append(time.perf_counter())
@@ -1206,7 +1206,7 @@ def main() -> int:
                         flush=True,
                     )
             else:
-                cv2.imshow("Katena Live  (q quit, s snap, h help)", frame)
+                cv2.imshow("BlackFiber Live  (q quit, s snap, h help)", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
                     break

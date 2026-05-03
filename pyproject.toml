@@ -1,5 +1,5 @@
 [project]
-name = "katena"
+name = "blackfiber"
 version = "0.1.0"
 description = "FOG Drone Fiber-Tether Neutralization System"
 requires-python = ">=3.11"

@@ -44,7 +44,7 @@ import numpy as np
 
 
 _INDEX_HTML = """<!doctype html>
-<html><head><title>Katena live</title>
+<html><head><title>BlackFiber live</title>
 <style>
   body { background:#0b0d10; color:#e5e7eb; font:14px ui-monospace,monospace;
          margin:0; padding:16px; }
@@ -64,7 +64,7 @@ _INDEX_HTML = """<!doctype html>
   #lstatus.on { color:#86efac; }
 </style></head>
 <body>
-  <h1>KATENA LIVE  /stream.mjpg
+  <h1>BLACKFIBER LIVE  /stream.mjpg
     <button id="engBtn" onclick="toggleEng()">ENGAGE LASER</button>
     <span id="lstatus">parked</span>
     <span style="opacity:0.4">|</span>

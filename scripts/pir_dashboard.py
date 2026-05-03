@@ -155,7 +155,7 @@ def _render(stats: Stats, source_label: str, telem_age: float) -> str:
     def centered(s: str) -> str:
         return "| " + s.center(width - 4) + " |"
 
-    title = "Katena PIR Safety Interlock"
+    title = "BlackFiber PIR Safety Interlock"
     pad = " " * max(1, width - 4 - len(title) - len(source_label))
     header = title + pad + source_label
 

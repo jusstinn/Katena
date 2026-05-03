@@ -214,5 +214,5 @@ class TestOpenLinkFactory:
         assert isinstance(link, MockPicoLink)
 
     def test_falls_back_to_mock_when_port_missing(self):
-        link = open_link(mock=False, port="/dev/cu.this-port-does-not-exist-katena")
+        link = open_link(mock=False, port="/dev/cu.this-port-does-not-exist-blackfiber")
         assert isinstance(link, MockPicoLink)

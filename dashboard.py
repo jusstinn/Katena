@@ -1,4 +1,4 @@
-"""Katena commander dashboard — local Streamlit twin of the Foundry view.
+"""BlackFiber commander dashboard — local Streamlit twin of the Foundry view.
 
 Reads engagements.jsonl in real time, renders an ops-style display:
   - Big KPI counters at the top (total / neutralized / live)
@@ -161,7 +161,7 @@ def render_table(df: pd.DataFrame, threat_filter: list[str], cut_filter: str) ->
 
 def main() -> None:
     st.set_page_config(
-        page_title="Katena · FOG Drone Neutralizer",
+        page_title="BlackFiber · FOG Drone Neutralizer",
         page_icon="🎯",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -179,7 +179,7 @@ def main() -> None:
     )
 
     with st.sidebar:
-        st.markdown("### Katena")
+        st.markdown("### BlackFiber")
         st.caption("FOG Drone Fiber-Tether Neutralization")
         log_path_str = st.text_input("Engagements log", str(DEFAULT_LOG))
         auto_refresh = st.checkbox("Auto-refresh (2s)", value=True)

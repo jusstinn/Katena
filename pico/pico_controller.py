@@ -1,4 +1,4 @@
-"""Katena pan/tilt + base-rotation + sensor controller for Raspberry Pi Pico W.
+"""BlackFiber pan/tilt + base-rotation + sensor controller for Raspberry Pi Pico W.
 
 Runs on MicroPython. Upload as `main.py` to auto-start on boot.
 

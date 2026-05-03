@@ -1,4 +1,4 @@
-"""Katena MacBook-side application code.
+"""BlackFiber MacBook-side application code.
 
 Modules:
     config           - Centralized configuration loaded from .env

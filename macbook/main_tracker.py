@@ -102,7 +102,7 @@ class Tracker:
 
         self.auto_engage = auto_engage
         self.show_help = True
-        self.window = "Katena Tracker  (h help, q quit)"
+        self.window = "BlackFiber Tracker  (h help, q quit)"
 
         self.current_engagement: DroneEngagement | None = None
         self.state_entered_at = time.time()

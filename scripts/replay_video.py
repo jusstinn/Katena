@@ -1,4 +1,4 @@
-"""Replay a recorded video through the Katena detector stack.
+"""Replay a recorded video through the BlackFiber detector stack.
 
 Pipes any video file (drone-flight footage, archived camera capture,
 whatever) through the SAME `EnsembleDetector` (motion + YOLO) that
@@ -498,7 +498,7 @@ def main() -> int:
     if args.start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, args.start_frame)
 
-    window = "Katena Replay  (space=pause, ←/→=step, s=save frame, q=quit)"
+    window = "BlackFiber Replay  (space=pause, ←/→=step, s=save frame, q=quit)"
     if not args.no_window:
         cv2.namedWindow(window)
 

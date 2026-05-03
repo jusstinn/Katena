@@ -4,7 +4,7 @@ PY := .venv/bin/python
 ACTIVATE := source .venv/bin/activate
 
 help:
-	@echo "Katena — common commands"
+	@echo "BlackFiber — common commands"
 	@echo ""
 	@echo "  make test           Run unit tests (fast, no hardware)"
 	@echo "  make test-fast      Run tests, fail on first error"

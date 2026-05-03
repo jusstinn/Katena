@@ -91,7 +91,7 @@ class CalibrationApp:
         self.show_help = True
         self.mouse_xy: tuple[int, int] = (self.cal.frame_width // 2, self.cal.frame_height // 2)
         self.message: tuple[str, float] = ("", 0.0)
-        self.window = "Katena Calibration  (h for help, q to quit)"
+        self.window = "BlackFiber Calibration  (h for help, q to quit)"
         cv2.namedWindow(self.window)
         cv2.setMouseCallback(self.window, self._on_mouse)
 

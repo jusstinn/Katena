@@ -1,4 +1,4 @@
-"""Target tracking + motion prediction for the Katena pipeline.
+"""Target tracking + motion prediction for the BlackFiber pipeline.
 
 A `TargetPredictor` consumes per-frame `(timestamp, x, y)` observations
 of the drone (typically the bbox centroid from the detector) and
@@ -105,7 +105,7 @@ def cable_aim_offset(
 ) -> tuple[float, float]:
     """Apply the fiber-cable aim offset.
 
-    For the Katena neutralisation strategy we don't aim AT the drone,
+    For the BlackFiber neutralisation strategy we don't aim AT the drone,
     we aim at the trailing fiber-optic tether. The cable hangs roughly
     straight down from the airframe, so a positive `offset_y` (pixels
     BELOW the drone) is usually what you want. Tune empirically once

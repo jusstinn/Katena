@@ -1,6 +1,6 @@
 """Laser sweep trajectory planner.
 
-For the Katena fiber-cut laser we don't aim at a single point — the cable
+For the BlackFiber fiber-cut laser we don't aim at a single point — the cable
 is ~1mm thin, the drone is moving, and the cable swings. We sweep the
 laser through a small ZONE below the drone so the moving cable can't
 escape it for long.

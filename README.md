@@ -1,4 +1,4 @@
-# Katena — FOG Drone Fiber-Tether Neutralization System
+# BlackFiber — FOG Drone Fiber-Tether Neutralization System
 
 > **One sentence:** Jammers don't work on Fiber-Optic-Guided drones.
 > We don't jam — we corrupt the optical channel by damaging the fiber's
@@ -11,7 +11,7 @@
 
 ## Live demo
 
-![Katena closed-loop drone neutralization demo](DroneKill.gif)
+![BlackFiber closed-loop drone neutralization demo](DroneKill.gif)
 
 > Closed-loop run on the bench rig: drone-trained YOLOv8 on a Jetson
 > CASK, pixel-to-servo IDW calibration, and a 100 Hz host-side
@@ -95,7 +95,7 @@ ENGAGE LASER toggle); the Jetson does all real-time work.
 ## Repository layout
 
 ```
-Katena/
+BlackFiber/                      # (clones as 'Katena/' if you keep the legacy repo name)
 ├── macbook/                     # Detection + sweep + UI (Python 3.11)
 │   ├── detector.py              # MOG2 + YOLOv8 ensemble (YOLO-priority fusion)
 │   ├── tracker.py               # Kalman-style predictor + lead point

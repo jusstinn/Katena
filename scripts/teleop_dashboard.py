@@ -14,7 +14,7 @@ small live status panel in your terminal. Two ways to source the log:
 Renders a panel like:
 
     +------------------------------------------------------------+
-    | Katena Pico teleop                       cask:teleop_pico  |
+    | BlackFiber Pico teleop                   cask:teleop_pico  |
     |                                                            |
     |  pan  :  87.5 deg   ->  target  87.5 deg                   |
     |  tilt :  92.0 deg   ->  target  92.0 deg                   |
@@ -110,7 +110,7 @@ def _render(state: dict, source_label: str, last_update_age: float) -> str:
     def line(s: str) -> str:
         return "| " + s.ljust(width - 4) + " |"
 
-    title = f"Katena Pico teleop"
+    title = f"BlackFiber Pico teleop"
     pad = " " * max(1, width - 4 - len(title) - len(source_label))
     header = title + pad + source_label
 
